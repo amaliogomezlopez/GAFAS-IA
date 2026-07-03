@@ -1,0 +1,46 @@
+# Dependencies (EAS installs from package.json)
+node_modules/
+
+# Expo local cache
+.expo/
+
+# Native build folders (EAS builds from source)
+ios/
+android/
+
+# Build outputs
+dist/
+web-build/
+build/
+
+# Debug / logs
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+
+# Metro cache
+.metro-health-check*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Git
+.git/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test output
+coverage/
+__tests__/
+

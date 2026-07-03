@@ -1,0 +1,15 @@
+[Unit]
+Description=SmartGlasses AI Proxy Server
+After=network.target
+
+[Service]
+Type=simple
+User=smartglasses
+WorkingDirectory=/opt/smartglasses-proxy
+ExecStart=/opt/smartglasses-proxy/venv/bin/gunicorn --bind 0.0.0.0:5050 --workers 2 --timeout 60 server:app
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/smartglasses-proxy/.env
+
+[Install]
+WantedBy=multi-user.target

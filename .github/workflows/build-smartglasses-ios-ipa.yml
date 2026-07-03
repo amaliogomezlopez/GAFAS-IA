@@ -1,0 +1,76 @@
+name: Build SmartGlasses iOS IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios-ipa:
+    name: Build unsigned IPA for Sideloadly
+    runs-on: macos-15
+
+    env:
+      CI: true
+      EXPO_NO_TELEMETRY: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Prebuild iOS project
+        run: npx expo prebuild --platform ios --non-interactive
+
+      - name: Install CocoaPods dependencies
+        run: pod install --repo-update
+        working-directory: ios
+
+      - name: Build unsigned iPhoneOS app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace ios/SmartGlassesAI.xcworkspace \
+            -scheme SmartGlassesAI \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -n 1)"
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app found in Release-iphoneos"
+            exit 1
+          fi
+          rm -rf build/Payload build/SmartGlassesAI-unsigned.ipa
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          ditto -c -k --keepParent build/Payload build/SmartGlassesAI-unsigned.ipa
+          ls -lh build/SmartGlassesAI-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartGlassesAI-unsigned-ipa
+          path: build/SmartGlassesAI-unsigned.ipa
+          if-no-files-found: error

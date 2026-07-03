@@ -1,0 +1,70 @@
+{
+  "expo": {
+    "name": "SmartGlasses AI",
+    "slug": "smartglasses-expo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F0F1A"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.smartglassesai.expo",
+      "buildNumber": "3",
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "La app necesita acceso al reconocimiento de voz para interpretar los comandos de las gafas inteligentes.",
+        "NSMicrophoneUsageDescription": "La app necesita acceso al micrófono para grabar tu voz y transcribirla.",
+        "NSBluetoothAlwaysUsageDescription": "La app usa Bluetooth para conectarse a tus gafas inteligentes AiMB-S1.",
+        "NSBluetoothPeripheralUsageDescription": "La app usa Bluetooth para comunicarse con dispositivos BLE.",
+        "UIBackgroundModes": [
+          "audio",
+          "bluetooth-central"
+        ],
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0F0F1A"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "package": "com.smartglassesai.expo",
+      "permissions": [
+        "RECORD_AUDIO",
+        "BLUETOOTH",
+        "BLUETOOTH_ADMIN",
+        "BLUETOOTH_CONNECT",
+        "BLUETOOTH_SCAN",
+        "ACCESS_FINE_LOCATION",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-audio",
+      "react-native-ble-plx",
+      "expo-speech-recognition",
+      "expo-font",
+      "expo-asset"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "3bdf1066-dabb-47db-a9e4-ddda888b9e9b"
+      }
+    }
+  }
+}
