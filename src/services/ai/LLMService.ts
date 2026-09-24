@@ -1,5 +1,5 @@
 import { SecureStorage } from '../secure-storage';
-import { getProxyAuthHeaders } from '../proxy-auth';
+import { getProxyAuthHeaders, PROXY_NOT_CONFIGURED_MESSAGE } from '../proxy-auth';
 import { API_ENDPOINTS } from '../../constants';
 import { ConversationMessage, LLMProvider } from '../../types';
 import { Platform } from 'react-native';
@@ -66,10 +66,26 @@ let proxyHealthState: ProxyHealthState = {
   healthy: null,
 };
 
+/** Turns an HTTP error into a short message that makes sense to the user. */
 const sanitizeError = (status: number, body: string): string => {
-  const sanitized = body.replace(/(?:sk-|Bearer\s+)[a-zA-Z0-9_-]{10,}/g, '[REDACTED]');
-  const truncated = sanitized.length > 200 ? sanitized.substring(0, 200) + '...' : sanitized;
-  return `LLM error (${status}): ${truncated}`;
+  let detail = '';
+  try {
+    const parsed = JSON.parse(body);
+    detail = String(parsed?.error?.message ?? parsed?.error ?? parsed?.message ?? '');
+  } catch {
+    // HTML error pages (proxies, load balancers) are just noise on a phone screen.
+    detail = /<\s*(!doctype|html|head|body)/i.test(body) ? '' : body;
+  }
+  detail = detail.replace(/(?:sk-|Bearer\s+)[a-zA-Z0-9_-]{10,}/g, '[REDACTED]').trim();
+  if (detail.length > 160) detail = `${detail.substring(0, 160)}…`;
+
+  const hint =
+    status === 401 || status === 403 ? 'El servidor rechazó la autorización. Vincula el iPhone en Ajustes → Seguridad del proxy.' :
+    status === 429 ? 'Demasiadas peticiones seguidas. Espera un minuto.' :
+    status === 404 || status === 501 ? 'El servidor no reconoce esta ruta. Revisa la URL del proxy.' :
+    status >= 500 ? 'El servidor de IA no está disponible ahora mismo.' :
+    'La petición al modelo falló.';
+  return detail ? `${hint} (${status}: ${detail})` : `${hint} (${status})`;
 };
 
 const describeFetchFailure = (service: string, error: unknown): Error => {
@@ -85,6 +101,12 @@ const describeFetchFailure = (service: string, error: unknown): Error => {
   }
   return new Error(`${service}: ${raw || 'fallo de red'}`);
 };
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+const DEFAULT_DEVICE_NAME = 'iPhone';
 
 function shouldReuseProxyHealth(): boolean {
   return Date.now() - proxyHealthState.checkedAt < PROXY_HEALTH_TTL_MS && proxyHealthState.healthy !== null;
@@ -340,7 +362,10 @@ function getHermesMaxTokens(requestedMaxTokens: number): number {
 }
 
 export const LLMService = {
-  async pairProxyDevice(code: string, deviceName: string = 'Amalio iPhone', signal?: AbortSignal): Promise<ProxyDevicePairResponse> {
+  async pairProxyDevice(code: string, deviceName: string = DEFAULT_DEVICE_NAME, signal?: AbortSignal): Promise<ProxyDevicePairResponse> {
+    if (!/^https?:\/\//.test(API_ENDPOINTS.proxy.authPair)) {
+      throw new Error(PROXY_NOT_CONFIGURED_MESSAGE);
+    }
     let response: Response;
     try {
       response = await fetch(API_ENDPOINTS.proxy.authPair, {
@@ -348,7 +373,7 @@ export const LLMService = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           code: code.trim(),
-          device_name: deviceName.trim() || 'Amalio iPhone',
+          device_name: deviceName.trim() || DEFAULT_DEVICE_NAME,
           client: 'smartglasses',
         }),
         signal,
@@ -533,8 +558,9 @@ export const LLMService = {
     }
 
     if (provider === 'opencode' && !isOpenCodeAnthropicModel(model)) {
-      const proxyHeaders = await getProxyAuthHeaders();
+      let partialText = '';
       try {
+        const proxyHeaders = await getProxyAuthHeaders();
         const result = await requestOpenAICompatibleStream(
           API_ENDPOINTS.proxy.opencodeChat,
           null,
@@ -542,12 +568,25 @@ export const LLMService = {
           systemPrompt,
           messages,
           getOpenCodeMaxTokens(model, options.maxTokens ?? DEFAULT_MAX_TOKENS),
-          options,
+          {
+            ...options,
+            onDelta: (delta, fullText) => {
+              partialText = fullText;
+              options.onDelta?.(delta, fullText);
+            },
+          },
           proxyHeaders,
           'OpenCode proxy stream',
         );
         if (result.streamed) return result;
       } catch (error) {
+        if (isAbortError(error) || options.signal?.aborted) throw error;
+        // Part of the answer was already shown/spoken: keep it rather than
+        // asking again and repeating the whole reply.
+        if (partialText) {
+          LogService.warn('LLM', `OpenCode stream interrupted, keeping partial answer: ${String(error)}`);
+          return { text: partialText, streamed: true };
+        }
         const message = error instanceof Error ? error.message : String(error);
         LogService.warn('LLM', `OpenCode streaming unavailable: ${message}`);
       }
@@ -613,7 +652,7 @@ export const LLMService = {
     }
 
     const data = await response.json();
-    return data.choices[0].message.content;
+    return data.choices?.[0]?.message?.content ?? '';
   },
 
   async chatAnthropic(
@@ -645,8 +684,7 @@ export const LLMService = {
       throw new Error(sanitizeError(response.status, await response.text()));
     }
 
-    const data = await response.json();
-    return data.content[0].text;
+    return fetchJsonText(response);
   },
 
   async chatGoogle(
@@ -681,7 +719,8 @@ export const LLMService = {
     }
 
     const data = await response.json();
-    return data.candidates[0].content.parts[0].text;
+    const parts: Array<{ text?: string }> = data.candidates?.[0]?.content?.parts ?? [];
+    return parts.map((part) => part.text ?? '').join('');
   },
 
   async chatOpenCode(
@@ -692,10 +731,10 @@ export const LLMService = {
   ): Promise<string> {
     const apiKey = await SecureStorage.getAPIKey('opencode');
     const maxTokens = getOpenCodeMaxTokens(model, options.maxTokens ?? DEFAULT_MAX_TOKENS);
-    const proxyHeaders = await getProxyAuthHeaders();
     const useAnthropic = isOpenCodeAnthropicModel(model);
 
     try {
+      const proxyHeaders = await getProxyAuthHeaders();
       if (useAnthropic) {
         return await requestAnthropicCompatible(
           API_ENDPOINTS.proxy.opencodeMessages,
@@ -722,12 +761,16 @@ export const LLMService = {
         'OpenCode proxy',
       );
     } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw error;
       const message = error instanceof Error ? error.message : String(error);
-      LogService.warn('LLM', `OpenCode proxy unavailable, checking secure direct key: ${message}`);
+      if (!apiKey) {
+        throw new Error(`OpenCode no disponible: ${message}`);
+      }
+      LogService.warn('LLM', `OpenCode proxy unavailable, using secure direct key: ${message}`);
     }
 
     if (!apiKey) {
-      throw new Error('OpenCode no disponible: el proxy no respondio y no hay clave manual guardada.');
+      throw new Error('OpenCode no disponible: el proxy no respondió y no hay clave manual guardada.');
     }
 
     if (useAnthropic) {

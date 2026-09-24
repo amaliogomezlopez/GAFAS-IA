@@ -1,33 +1,43 @@
+import { Platform } from 'react-native';
 import { AIProfile, GrokVoice, LLMModel, ResponseStyle, TTSVoice } from '../types';
 
-/* ─── Stark Industries Design System ──────────────────────── */
+/* ─── KAIRO HUD Design System ──────────────────────────────── */
 export const COLORS = {
   // Core palette
   primary: '#00D4FF',       // Arc reactor cyan
-  primaryLight: '#33DDFF',
+  primaryLight: '#5FE3FF',
   primaryDark: '#0099CC',
-  accent: '#FF6B35',        // Stark gold-orange
-  accentLight: '#FF8F66',
-  // Surfaces
-  background: '#060A12',    // Deep space black
-  card: '#0D1520',
-  surface: '#111B2A',
+  onPrimary: '#03121A',     // Text/icons on a solid primary surface
+  accent: '#FF8A3D',        // Warm orange for highlights
+  accentLight: '#FFAB73',
+  // Surfaces (from deepest to most raised)
+  background: '#05080F',
+  card: '#0B121D',
+  surface: '#101A28',
   surfaceLight: '#162233',
-  border: '#1E3048',
+  surfaceRaised: '#1B2A3E',
+  border: '#1C2B40',
   borderLight: '#2A4060',
+  overlay: 'rgba(2, 5, 10, 0.72)',
   // Text
   text: '#E8F0FF',
-  textSecondary: '#7B8FA8',
-  textMuted: '#4A5F78',
+  textSecondary: '#8B9DB5',
+  textMuted: '#55697F',
   // Semantic
-  success: '#00FF88',
+  success: '#2EE59D',
   warning: '#FFB800',
-  error: '#FF3B5C',
+  error: '#FF4D6A',
   // Pipeline states
   listening: '#00D4FF',
   processing: '#FFB800',
-  speaking: '#00FF88',
+  speaking: '#2EE59D',
 };
+
+/** `#RRGGBB` + alpha (0–1) → `#RRGGBBAA`. Keeps tinted surfaces readable. */
+export function withAlpha(hex: string, alpha: number): string {
+  const clamped = Math.max(0, Math.min(1, alpha));
+  return `${hex}${Math.round(clamped * 255).toString(16).padStart(2, '0')}`;
+}
 
 export const SPACING = {
   xs: 4,
@@ -36,6 +46,14 @@ export const SPACING = {
   lg: 24,
   xl: 32,
   xxl: 48,
+};
+
+export const RADIUS = {
+  sm: 8,
+  md: 12,
+  lg: 16,
+  xl: 22,
+  pill: 999,
 };
 
 export const FONT_SIZE = {
@@ -47,6 +65,9 @@ export const FONT_SIZE = {
   xxl: 24,
   xxxl: 32,
 };
+
+/** Monospace face for logs and technical values. */
+export const MONO_FONT = Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' });
 
 export const LLM_MODELS: LLMModel[] = [
   { id: 'deepseek-v4-flash', name: 'Hermes / DeepSeek V4 Flash', provider: 'hermes' },
@@ -305,6 +326,7 @@ export const DEFAULT_SETTINGS = {
   bluetoothAutoScanDurationMs: 2500,
   bluetoothAutoReconnectIntervalMs: 7000,
   speechDebugAudioEnabled: true,
+  settingsVersion: 2,
 };
 
 /** Proxy server configuration — keeps API keys server-side */

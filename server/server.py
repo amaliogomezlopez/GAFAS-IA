@@ -12,6 +12,7 @@ import logging
 import subprocess
 import threading
 import hmac
+import re
 from functools import wraps
 from collections import defaultdict
 
@@ -79,10 +80,16 @@ KOKORO_ENABLED = os.getenv('KOKORO_ENABLED', 'false').lower() in {'1', 'true', '
 MINIMAX_CHAT_URL = 'https://api.minimax.io/anthropic/v1/messages'
 MINIMAX_TTS_URL = 'https://api.minimaxi.com/v1/t2a_v2'
 
-# Rate limiting: max requests per minute per client IP
+# Rate limiting: max requests per minute per device (or client IP).
 RATE_LIMIT = int(os.getenv('RATE_LIMIT', '30'))
+# TTS gets its own, larger budget: the streaming voice path makes one Kokoro
+# request per sentence, so a few chatty turns would otherwise exhaust the
+# shared chat budget and silence the assistant mid-conversation.
+TTS_RATE_LIMIT = int(os.getenv('TTS_RATE_LIMIT', '120'))
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
+_rate_lock = threading.Lock()
 _model_switch_lock = threading.Lock()
+_kokoro_lock = threading.Lock()
 _auth_store = DeviceAuthStore(AUTH_DB_PATH, AUTH_TOKEN_PEPPER, DEVICE_TOKEN_TTL_DAYS)
 _auth_store.init()
 _kokoro_pipelines: dict[str, object] = {}
@@ -197,6 +204,36 @@ def _ensure_hermes_model(model: str):
         return _switch_hermes_to_opencode_go(model)
 
 
+def _json_body():
+    """Parse the request body as a JSON object.
+
+    Returns (body, None) or (None, error_response). `get_json(force=True)`
+    alone happily returns None or a list, which later crashed with a 500.
+    """
+    body = request.get_json(force=True, silent=True)
+    if not isinstance(body, dict):
+        return None, (jsonify({'error': 'Invalid JSON body: expected an object'}), 400)
+    return body, None
+
+
+def _clamp_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(minimum, min(number, maximum))
+
+
+def _clamp_float(value, default: float, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    if number != number:  # NaN
+        number = default
+    return max(minimum, min(number, maximum))
+
+
 def _validate_messages(messages) -> tuple[bool, str]:
     if not isinstance(messages, list) or not messages:
         return False, 'messages must be a non-empty array'
@@ -287,22 +324,41 @@ def require_auth(arg=None):
     return decorator
 
 
-def rate_limit(f):
-    """Simple in-memory rate limiter per authenticated device or client IP."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        ip = request.remote_addr or 'unknown'
-        auth_context = getattr(g, 'auth_context', None)
-        bucket_key = f'device:{auth_context["id"]}' if auth_context else f'ip:{ip}'
-        now = time.time()
-        window = [t for t in _rate_buckets[bucket_key] if now - t < 60]
-        if len(window) >= RATE_LIMIT:
+def _check_rate_limit(bucket: str, limit: int):
+    ip = request.remote_addr or 'unknown'
+    auth_context = getattr(g, 'auth_context', None)
+    who = f'device:{auth_context["id"]}' if auth_context else f'ip:{ip}'
+    bucket_key = f'{bucket}:{who}'
+    now = time.time()
+    with _rate_lock:
+        window = [t for t in _rate_buckets.get(bucket_key, []) if now - t < 60]
+        if len(window) >= limit:
             logger.warning('Rate limited: %s (%d req/min)', bucket_key, len(window))
             return jsonify({'error': 'Rate limited. Try again in a minute.'}), 429
         window.append(now)
         _rate_buckets[bucket_key] = window
-        return f(*args, **kwargs)
-    return decorated
+        # Drop idle buckets so the dict doesn't grow forever with old IPs.
+        if len(_rate_buckets) > 512:
+            for key in [k for k, v in _rate_buckets.items() if not v or now - v[-1] >= 60]:
+                _rate_buckets.pop(key, None)
+    return None
+
+
+def _rate_limiter(bucket: str, limit: int):
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            limited = _check_rate_limit(bucket, limit)
+            if limited is not None:
+                return limited
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
+
+
+# In-memory rate limiters per authenticated device or client IP.
+rate_limit = _rate_limiter('api', RATE_LIMIT)
+tts_rate_limit = _rate_limiter('tts', TTS_RATE_LIMIT)
 
 
 @app.after_request
@@ -348,10 +404,9 @@ def health():
 def pair_device():
     if not DEVICE_AUTH_ENABLED:
         return jsonify({'error': 'Device auth is not enabled'}), 400
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
+    body, error = _json_body()
+    if error:
+        return error
 
     code = str(body.get('code', '')).strip()
     device_name = str(body.get('device_name', 'iPhone')).strip()[:80] or 'iPhone'
@@ -397,20 +452,22 @@ def proxy_chat():
     if not MINIMAX_API_KEY:
         return jsonify({'error': 'MiniMax API key not configured on server'}), 500
 
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
+    body, error = _json_body()
+    if error:
+        return error
 
     # Validate required fields
     if 'messages' not in body or 'model' not in body:
         return jsonify({'error': 'Missing required fields: model, messages'}), 400
+    messages_ok, messages_error = _validate_messages(body.get('messages'))
+    if not messages_ok:
+        return jsonify({'error': messages_error}), 400
 
     # Sanitize: only forward expected fields
     payload = {
         'model': body['model'],
         'messages': body['messages'],
-        'max_tokens': min(body.get('max_tokens', 1024), 4096),
+        'max_tokens': _clamp_int(body.get('max_tokens'), 1024, 1, 4096),
     }
     if 'system' in body:
         payload['system'] = body['system']
@@ -454,13 +511,15 @@ def _proxy_opencode(path: str):
     if not api_key:
         return jsonify({'error': 'OpenCode API key not configured'}), 500
 
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
+    body, error = _json_body()
+    if error:
+        return error
 
     if 'messages' not in body or 'model' not in body:
         return jsonify({'error': 'Missing required fields: model, messages'}), 400
+    messages_ok, messages_error = _validate_messages(body.get('messages'))
+    if not messages_ok:
+        return jsonify({'error': messages_error}), 400
 
     allowed_fields = {
         'model',
@@ -475,7 +534,7 @@ def _proxy_opencode(path: str):
     payload = {key: value for key, value in body.items() if key in allowed_fields}
     should_stream = bool(payload.get('stream'))
     if 'max_tokens' in payload:
-        payload['max_tokens'] = min(int(payload.get('max_tokens') or 1024), 4096)
+        payload['max_tokens'] = _clamp_int(payload.get('max_tokens'), 1024, 1, 4096)
 
     logger.info('OpenCode request: path=%s, model=%s, messages=%d, ip=%s',
                 path, payload['model'], len(payload['messages']), request.remote_addr)
@@ -653,10 +712,9 @@ def proxy_hermes_model():
     if request.method == 'GET':
         return jsonify(_read_hermes_runtime_snapshot())
 
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
+    body, error = _json_body()
+    if error:
+        return error
     requested_model = str(body.get('model', '')).strip()
     if not requested_model:
         return jsonify({'error': 'Missing required field: model'}), 400
@@ -671,10 +729,9 @@ def proxy_hermes_model():
 @require_auth('chat')
 @rate_limit
 def proxy_hermes_chat():
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
+    body, error = _json_body()
+    if error:
+        return error
 
     if 'messages' not in body:
         return jsonify({'error': 'Missing required field: messages'}), 400
@@ -695,7 +752,7 @@ def proxy_hermes_chat():
     payload['model'] = payload.get('model') or HERMES_MODEL
     payload['stream'] = bool(payload.get('stream'))
     if 'max_tokens' in payload:
-        payload['max_tokens'] = min(int(payload.get('max_tokens') or 1024), 4096)
+        payload['max_tokens'] = _clamp_int(payload.get('max_tokens'), 1024, 1, 4096)
 
     switch_error = _ensure_hermes_model(str(payload['model']))
     if switch_error is not None:
@@ -710,10 +767,9 @@ def proxy_hermes_chat():
 @require_auth('chat')
 @rate_limit
 def proxy_hermes_responses():
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
+    body, error = _json_body()
+    if error:
+        return error
     body['model'] = body.get('model') or HERMES_MODEL
     body['stream'] = bool(body.get('stream'))
     switch_error = _ensure_hermes_model(str(body['model']))
@@ -729,26 +785,24 @@ def proxy_hermes_responses():
 def proxy_hermes_jobs(job_path: str | None = None):
     body = None
     if request.method in {'POST', 'PATCH'}:
-        try:
-            body = request.get_json(force=True)
-        except Exception:
-            return jsonify({'error': 'Invalid JSON body'}), 400
+        body, error = _json_body()
+        if error:
+            return error
     path = f'/api/jobs/{job_path}' if job_path else '/api/jobs'
     return _proxy_hermes_json(path, body, request.method)
 
 
 @app.route('/api/v1/tts', methods=['POST'])
 @require_auth('tts')
-@rate_limit
+@tts_rate_limit
 def proxy_tts():
     """Proxy TTS requests to MiniMax T2A."""
     if not MINIMAX_API_KEY:
         return jsonify({'error': 'MiniMax API key not configured on server'}), 500
 
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
+    body, error = _json_body()
+    if error:
+        return error
 
     logger.info('TTS request: ip=%s', request.remote_addr)
 
@@ -826,10 +880,34 @@ def _get_kokoro_pipeline(lang_code: str):
     pipeline = _kokoro_pipelines.get(lang_code)
     if pipeline is not None:
         return pipeline
-    from kokoro import KPipeline
-    pipeline = KPipeline(lang_code=lang_code)
-    _kokoro_pipelines[lang_code] = pipeline
+    # Loading the model is slow and memory hungry; make sure two concurrent
+    # first requests don't both build one.
+    with _kokoro_lock:
+        pipeline = _kokoro_pipelines.get(lang_code)
+        if pipeline is None:
+            from kokoro import KPipeline
+            pipeline = KPipeline(lang_code=lang_code)
+            _kokoro_pipelines[lang_code] = pipeline
     return pipeline
+
+
+def _parse_kokoro_request():
+    """Shared validation for both Kokoro routes → ((text, voice, speed), None) or (None, error)."""
+    if not KOKORO_ENABLED:
+        return None, (jsonify({'error': 'Kokoro TTS is not enabled on this server'}), 503)
+    body, error = _json_body()
+    if error:
+        return None, error
+    text = str(body.get('text', '')).strip()
+    voice = str(body.get('voice', 'ef_dora'))
+    speed = _clamp_float(body.get('speed'), 1.05, 0.75, 1.35)
+    if not text:
+        return None, (jsonify({'error': 'Missing text'}), 400)
+    if len(text) > 2500:
+        return None, (jsonify({'error': 'Text too long (max 2500 chars)'}), 400)
+    if voice not in ALLOWED_KOKORO_VOICES:
+        return None, (jsonify({'error': f'Voice not allowed: {voice}'}), 400)
+    return (text, voice, speed), None
 
 
 def _synthesize_kokoro(text: str, voice: str, speed: float) -> bytes:
@@ -855,27 +933,13 @@ def _synthesize_kokoro(text: str, voice: str, speed: float) -> bytes:
 
 @app.route('/api/v1/tts/kokoro', methods=['POST'])
 @require_auth('tts')
-@rate_limit
+@tts_rate_limit
 def proxy_tts_kokoro():
     """Synthesize speech using optional local Kokoro TTS."""
-    if not KOKORO_ENABLED:
-        return jsonify({'error': 'Kokoro TTS is not enabled on this server'}), 503
-
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
-
-    text = body.get('text', '').strip()
-    voice = body.get('voice', 'ef_dora')
-    speed = max(0.75, min(float(body.get('speed', 1.05)), 1.35))
-
-    if not text:
-        return jsonify({'error': 'Missing text'}), 400
-    if len(text) > 2500:
-        return jsonify({'error': 'Text too long (max 2500 chars)'}), 400
-    if voice not in ALLOWED_KOKORO_VOICES:
-        return jsonify({'error': f'Voice not allowed: {voice}'}), 400
+    parsed, error = _parse_kokoro_request()
+    if error:
+        return error
+    text, voice, speed = parsed
 
     logger.info('Kokoro TTS request: voice=%s, text_len=%d, ip=%s', voice, len(text), request.remote_addr)
     t0 = time.time()
@@ -908,17 +972,24 @@ def _kokoro_pcm16_segments(text: str, voice: str, speed: float):
 
     lang_code = ALLOWED_KOKORO_VOICES[voice]
     pipeline = _get_kokoro_pipeline(lang_code)
-    for _, _, audio in pipeline(text, voice=voice, speed=speed):
-        samples = _to_soundfile_audio(audio)
-        # Kokoro returns float32 in [-1, 1]. Convert to little-endian PCM16.
-        clipped = np.clip(samples, -1.0, 1.0)
-        pcm = (clipped * 32767.0).astype('<i2')
-        yield pcm.tobytes()
+    try:
+        for _, _, audio in pipeline(text, voice=voice, speed=speed):
+            if audio is None:
+                continue
+            samples = _to_soundfile_audio(audio)
+            # Kokoro returns float32 in [-1, 1]. Convert to little-endian PCM16.
+            clipped = np.clip(samples, -1.0, 1.0)
+            pcm = (clipped * 32767.0).astype('<i2')
+            yield pcm.tobytes()
+    except GeneratorExit:
+        raise
+    except Exception as e:  # headers are already sent; just end the stream
+        logger.error('Kokoro STREAM failed mid-stream: %s', e)
 
 
 @app.route('/api/v1/tts/kokoro/stream', methods=['POST'])
 @require_auth('tts')
-@rate_limit
+@tts_rate_limit
 def proxy_tts_kokoro_stream():
     """Streaming Kokoro TTS — raw PCM16 24kHz mono, chunked as generated.
 
@@ -927,24 +998,21 @@ def proxy_tts_kokoro_stream():
     on the first bytes. Designed to be called per sentence by the client's
     streaming speaker so TTS overlaps with both LLM generation and playback.
     """
-    if not KOKORO_ENABLED:
-        return jsonify({'error': 'Kokoro TTS is not enabled on this server'}), 503
+    parsed, error = _parse_kokoro_request()
+    if error:
+        return error
+    text, voice, speed = parsed
 
+    # Load the model before sending headers: once the 200 streaming response
+    # has started, a missing dependency would just look like empty audio.
     try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
-
-    text = body.get('text', '').strip()
-    voice = body.get('voice', 'ef_dora')
-    speed = max(0.75, min(float(body.get('speed', 1.05)), 1.35))
-
-    if not text:
-        return jsonify({'error': 'Missing text'}), 400
-    if len(text) > 2500:
-        return jsonify({'error': 'Text too long (max 2500 chars)'}), 400
-    if voice not in ALLOWED_KOKORO_VOICES:
-        return jsonify({'error': f'Voice not allowed: {voice}'}), 400
+        _get_kokoro_pipeline(ALLOWED_KOKORO_VOICES[voice])
+    except ImportError as e:
+        logger.error('Kokoro dependencies missing: %s', e)
+        return jsonify({'error': 'Kokoro dependencies are not installed on this server'}), 503
+    except Exception as e:
+        logger.error('Kokoro pipeline init failed: %s', e)
+        return jsonify({'error': 'Kokoro synthesis failed'}), 500
 
     logger.info('Kokoro STREAM request: voice=%s, text_len=%d, ip=%s',
                 voice, len(text), request.remote_addr)
@@ -968,20 +1036,24 @@ def proxy_tts_kokoro_stream():
     return response
 
 
+_EDGE_PERCENT_RE = re.compile(r'^[+-]\d{1,3}%$')
+
+
 @app.route('/api/v1/tts/edge', methods=['POST'])
 @require_auth('tts')
-@rate_limit
+@tts_rate_limit
 def proxy_tts_edge():
     """Synthesize speech using Microsoft Edge TTS (free, high-quality neural voices)."""
-    try:
-        body = request.get_json(force=True)
-    except Exception:
-        return jsonify({'error': 'Invalid JSON body'}), 400
+    body, error = _json_body()
+    if error:
+        return error
 
-    text = body.get('text', '').strip()
-    voice = body.get('voice', 'es-ES-AlvaroNeural')
-    rate = body.get('rate', '+0%')
-    volume = body.get('volume', '+0%')
+    text = str(body.get('text', '')).strip()
+    voice = str(body.get('voice', 'es-ES-AlvaroNeural'))
+    rate = str(body.get('rate', '+0%'))
+    volume = str(body.get('volume', '+0%'))
+    if not _EDGE_PERCENT_RE.match(rate) or not _EDGE_PERCENT_RE.match(volume):
+        return jsonify({'error': 'rate/volume must look like "+10%" or "-5%"'}), 400
 
     if not text:
         return jsonify({'error': 'Missing text'}), 400
@@ -998,7 +1070,7 @@ def proxy_tts_edge():
         audio_data = _run_async(_synthesize_edge_with_options(text, voice, rate, volume))
     except Exception as e:
         logger.error('Edge TTS failed: %s', e)
-        return jsonify({'error': f'TTS synthesis failed: {str(e)}'}), 500
+        return jsonify({'error': 'TTS synthesis failed'}), 502
 
     elapsed = int((time.time() - t0) * 1000)
     logger.info('Edge TTS response: size=%d bytes, time=%dms', len(audio_data), elapsed)
@@ -1105,10 +1177,22 @@ def xai_realtime_session():
     })
 
 
-if __name__ == '__main__':
-    if not MINIMAX_API_KEY:
-        logger.warning('⚠️  MINIMAX_API_KEY not set! Proxy will reject all requests.')
+def _log_config_warnings() -> None:
+    # Logged at import time so gunicorn deployments see them too.
+    if not DEVICE_AUTH_ENABLED and not APP_TOKEN:
+        logger.warning('⚠️  No DEVICE_AUTH_ENABLED and no APP_TOKEN: every endpoint is OPEN to anyone '
+                       'who can reach this server. Enable device auth before exposing it publicly.')
     if DEVICE_AUTH_ENABLED and AUTH_TOKEN_PEPPER == 'smartglasses-dev-pepper':
         logger.warning('AUTH_TOKEN_PEPPER is using the development fallback.')
+    if '*' in CORS_ORIGINS:
+        logger.info('CORS_ORIGINS=* (fine for the native app; restrict it if you serve the web build).')
+    if not MINIMAX_API_KEY:
+        logger.info('MINIMAX_API_KEY not set: /api/v1/chat and /api/v1/tts will answer 500.')
+
+
+_log_config_warnings()
+
+
+if __name__ == '__main__':
     logger.info('Starting SmartGlasses proxy on port %d', PORT)
     app.run(host='0.0.0.0', port=PORT, debug=False)

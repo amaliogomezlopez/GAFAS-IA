@@ -37,10 +37,24 @@ public class GrokAudioModule: Module {
   private var isSessionActive = false
   private var isPlaying = false
 
-  // Ring-buffer-ish accounting for player scheduling (avoid underflow noise).
+  // Ring-buffer-ish accounting for player scheduling. `playerGeneration` is
+  // bumped on every flush so completion handlers of flushed buffers can't
+  // corrupt the count. Never call playerNode.stop() while on playerQueue:
+  // stop() fires completion handlers, which also hop onto playerQueue.
   private let playerQueue = DispatchQueue(label: "smartglasses.grok.player")
   private var scheduledFrames: Int = 0
-  private let maxScheduledFrames = 24000 * 2 // ~2s of audio buffered at most
+  private var playerGeneration: Int = 0
+  // Safety valve only. Kokoro/Grok deliver audio much faster than real time,
+  // so a whole answer is legitimately queued ahead; the old 2s cap flushed
+  // everything mid-sentence whenever a reply was longer than two seconds.
+  private let maxScheduledFrames = 24000 * 90
+
+  private let floatFormat: AVAudioFormat = AVAudioFormat(
+    commonFormat: .pcmFormatFloat32,
+    sampleRate: 24000,
+    channels: 1,
+    interleaved: false
+  )!
 
   public func definition() -> ModuleDefinition {
     Name("GrokAudio")
@@ -89,15 +103,17 @@ public class GrokAudioModule: Module {
 
     /// Flush the player queue immediately (barge-in / end of turn cleanup).
     Function("clearPlayback") { () -> Void in
-      self.playerQueue.sync {
-        self.playerNode.stop()
-        self.scheduledFrames = 0
+      self.flushPlayer()
+      if self.isSessionActive {
+        self.ensureEngineRunning()
+        self.playerNode.play()
       }
-      if self.isSessionActive, !self.engine.isRunning {
-        do { try self.engine.start() } catch {
-          self.emitError("Could not restart engine after clear: \(error.localizedDescription)")
-        }
-      }
+    }
+
+    /// Milliseconds of audio still scheduled on the player (0 when drained).
+    Function("getBufferedDurationMs") { () -> Double in
+      let frames = self.playerQueue.sync { self.scheduledFrames }
+      return Double(frames) / 24.0
     }
 
     // ── Capture (mic → base64 PCM16) ─────────────────────────
@@ -146,15 +162,12 @@ public class GrokAudioModule: Module {
 
     Function("interrupt") { () -> Void in
       // Barge-in: flush everything currently scheduled so Grok stops talking
-      // immediately when the user starts speaking.
-      self.playerQueue.sync {
-        self.playerNode.stop()
-        self.scheduledFrames = 0
-      }
-      if self.isSessionActive, !self.engine.isRunning {
-        do { try self.engine.start() } catch {
-          self.emitError("Could not restart engine after interrupt: \(error.localizedDescription)")
-        }
+      // immediately when the user starts speaking. The node is restarted so the
+      // next response plays (a stopped AVAudioPlayerNode stays silent).
+      self.flushPlayer()
+      if self.isSessionActive {
+        self.ensureEngineRunning()
+        self.playerNode.play()
       }
       self.emitState("interrupted")
     }
@@ -211,24 +224,14 @@ public class GrokAudioModule: Module {
   // MARK: – Playback
 
   private func startEnginePlayback() {
-    guard !engine.attachedNodes.contains(playerNode) else {
-      ensureEngineRunning()
-      return
+    if !engine.attachedNodes.contains(playerNode) {
+      engine.attach(playerNode)
+      // Convert pcm16 → standard deinterleaved float for the engine.
+      engine.connect(playerNode, to: engine.mainMixerNode, format: floatFormat)
     }
-    engine.attach(playerNode)
-    // Convert pcm16 → standard deinterleaved float for the engine.
-    guard let floatFormat = AVAudioFormat(
-      commonFormat: .pcmFormatFloat32,
-      sampleRate: 24000,
-      channels: 1,
-      interleaved: false
-    ) else {
-      emitError("Could not create player float format")
-      return
-    }
-
-    engine.connect(playerNode, to: engine.mainMixerNode, format: floatFormat)
     ensureEngineRunning()
+    // Always (re)start the node: after stopPlaybackSession / clearPlayback it
+    // is stopped, and buffers scheduled on a stopped node are never heard.
     playerNode.play()
     isPlaying = true
   }
@@ -248,6 +251,9 @@ public class GrokAudioModule: Module {
   private func schedulePcm16(_ data: Data) {
     guard isSessionActive else { return }
     ensureEngineRunning()
+    if !playerNode.isPlaying {
+      playerNode.play()
+    }
 
     let frameCount = data.count / MemoryLayout<Int16>.size
     guard frameCount > 0 else { return }
@@ -262,13 +268,6 @@ public class GrokAudioModule: Module {
         dst.update(from: src, count: frameCount)
       }
     }
-
-    guard let floatFormat = AVAudioFormat(
-      commonFormat: .pcmFormatFloat32,
-      sampleRate: 24000,
-      channels: 1,
-      interleaved: false
-    ) else { return }
 
     guard let floatBuffer = AVAudioPCMBuffer(pcmFormat: floatFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
       return
@@ -287,29 +286,43 @@ public class GrokAudioModule: Module {
     }
     guard ok, conversionError == nil else { return }
 
-    playerQueue.sync {
-      // If too much is already queued, drop the oldest segment to avoid drift.
-      if scheduledFrames > maxScheduledFrames {
-        playerNode.stop()
-        scheduledFrames = 0
-        ensureEngineRunning()
-        playerNode.play()
-      }
-      scheduledFrames += frameCount
+    let overflow = playerQueue.sync { scheduledFrames > maxScheduledFrames }
+    if overflow {
+      // Something is badly out of sync (e.g. the route died); start fresh
+      // rather than letting latency grow without bound.
+      flushPlayer()
+      ensureEngineRunning()
+      playerNode.play()
     }
 
-    playerNode.scheduleBuffer(floatBuffer, completionHandler: { [weak self] in
-      self?.playerQueue.sync {
-        self?.scheduledFrames = max(0, (self?.scheduledFrames ?? 0) - frameCount)
+    let generation: Int = playerQueue.sync {
+      scheduledFrames += frameCount
+      return playerGeneration
+    }
+
+    playerNode.scheduleBuffer(floatBuffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+      guard let self = self else { return }
+      self.playerQueue.async {
+        guard self.playerGeneration == generation else { return }
+        self.scheduledFrames = max(0, self.scheduledFrames - frameCount)
+        if self.scheduledFrames == 0 {
+          self.sendEvent("onPlaybackFinished", [:])
+        }
       }
-    })
+    }
+  }
+
+  /// Drop everything scheduled on the player and reset the accounting.
+  private func flushPlayer() {
+    playerQueue.sync {
+      playerGeneration += 1
+      scheduledFrames = 0
+    }
+    playerNode.stop()
   }
 
   private func stopPlayback() {
-    playerQueue.sync {
-      playerNode.stop()
-      scheduledFrames = 0
-    }
+    flushPlayer()
     isPlaying = false
   }
 

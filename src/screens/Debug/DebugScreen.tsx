@@ -8,12 +8,13 @@ import {
   Text,
   TouchableOpacity,
   View,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
-import { COLORS } from '../../constants';
+import { COLORS, MONO_FONT, RADIUS, withAlpha } from '../../constants';
 import { useAppStore } from '../../stores';
+import { ScreenHeader } from '../../components';
+import { WakeWordService } from '../../services/WakeWordService';
 import { AudioService } from '../../services/audio';
 import { BluetoothService, type GlassesButtonEvent, type GlassesButtonKind } from '../../services/bluetooth';
 import { LogService, type LogEntry, type LogLevel } from '../../services/LogService';
@@ -99,7 +100,7 @@ const DebugButton: React.FC<{
 
   return (
     <TouchableOpacity
-      style={[styles.debugButton, { borderColor: `${color}55` }, disabled && styles.debugButtonDisabled]}
+      style={[styles.debugButton, { borderColor: withAlpha(color, 0.35) }, disabled && styles.debugButtonDisabled]}
       onPress={onPress}
       disabled={disabled}
       activeOpacity={0.72}
@@ -128,18 +129,16 @@ const ButtonEventRow: React.FC<{ event: GlassesButtonEvent; sampleKind?: Glasses
 );
 
 export const DebugScreen: React.FC = () => {
-  const {
-    settings,
-    pipelineState,
-    currentTranscription,
-    interimTranscription,
-    currentResponse,
-    latencyMetrics,
-    isBluetoothConnected,
-    bluetoothDeviceName,
-    bluetoothBattery,
-    setBluetoothStatus,
-  } = useAppStore();
+  const settings = useAppStore((s) => s.settings);
+  const pipelineState = useAppStore((s) => s.pipelineState);
+  const currentTranscription = useAppStore((s) => s.currentTranscription);
+  const interimTranscription = useAppStore((s) => s.interimTranscription);
+  const currentResponse = useAppStore((s) => s.currentResponse);
+  const latencyMetrics = useAppStore((s) => s.latencyMetrics);
+  const isBluetoothConnected = useAppStore((s) => s.isBluetoothConnected);
+  const bluetoothDeviceName = useAppStore((s) => s.bluetoothDeviceName);
+  const bluetoothBattery = useAppStore((s) => s.bluetoothBattery);
+  const setBluetoothStatus = useAppStore((s) => s.setBluetoothStatus);
 
   const [logs, setLogs] = useState<LogEntry[]>(() => LogService.getLogs());
   const [devices, setDevices] = useState<DebugDevice[]>([]);
@@ -211,6 +210,27 @@ export const DebugScreen: React.FC = () => {
 
   const addDebugLog = useCallback((message: string, level: LogLevel = 'info') => {
     LogService.log(level, 'Debug', message);
+  }, []);
+
+  /**
+   * iOS only allows one speech/recording session at a time. Audio tests must
+   * not run on top of a live turn, and the passive wake-word listener has to
+   * be paused while they use the microphone or the speaker.
+   */
+  const runAudioTest = useCallback(async (label: string, test: () => Promise<void>) => {
+    if (useAppStore.getState().pipelineState !== 'idle') {
+      Alert.alert('KAIRO está ocupado', `Espera a que termine el turno actual antes de probar ${label}.`);
+      return;
+    }
+    const wakeWasListening = WakeWordService.isListening();
+    if (wakeWasListening) WakeWordService.pause();
+    try {
+      await test();
+    } finally {
+      if (wakeWasListening && useAppStore.getState().pipelineState === 'idle') {
+        WakeWordService.resume();
+      }
+    }
   }, []);
 
   const handleScan = useCallback(async () => {
@@ -324,7 +344,7 @@ export const DebugScreen: React.FC = () => {
     } catch {}
   }, [buttonEvents, photoButtonEvents, photoSignatureCandidate, videoButtonEvents, videoSignatureCandidate]);
 
-  const handleRecordMic = useCallback(async () => {
+  const handleRecordMic = useCallback(() => runAudioTest('el micrófono', async () => {
     setAudioState('running');
     setLastRecording(null);
     addDebugLog('Mic test: recording 3 seconds');
@@ -339,12 +359,12 @@ export const DebugScreen: React.FC = () => {
       const msg = error instanceof Error ? error.message : String(error);
       setAudioState('error');
       addDebugLog(`Mic test failed: ${msg}`, 'error');
-      Alert.alert('Audio input error', msg);
+      Alert.alert('Error de micrófono', msg);
       try { await AudioService.stopRecording(); } catch {}
     }
-  }, [addDebugLog]);
+  }), [addDebugLog, runAudioTest]);
 
-  const handlePlayRecording = useCallback(async () => {
+  const handlePlayRecording = useCallback(() => runAudioTest('la reproducción', async () => {
     if (!lastRecording?.uri) return;
     setAudioState('running');
     addDebugLog('Playing last mic recording');
@@ -355,11 +375,11 @@ export const DebugScreen: React.FC = () => {
       const msg = error instanceof Error ? error.message : String(error);
       setAudioState('error');
       addDebugLog(`Recording playback failed: ${msg}`, 'error');
-      Alert.alert('Playback error', msg);
+      Alert.alert('Error de reproducción', msg);
     }
-  }, [addDebugLog, lastRecording]);
+  }), [addDebugLog, lastRecording, runAudioTest]);
 
-  const handleTtsTest = useCallback(async () => {
+  const handleTtsTest = useCallback(() => runAudioTest('la voz', async () => {
     setTtsState('running');
     addDebugLog(`TTS test started (${settings.ttsProvider}/${settings.ttsVoice})`);
     try {
@@ -380,10 +400,11 @@ export const DebugScreen: React.FC = () => {
       const msg = error instanceof Error ? error.message : String(error);
       setTtsState('error');
       addDebugLog(`TTS test failed: ${msg}`, 'error');
-      Alert.alert('TTS error', msg);
+      Alert.alert('Error de voz', msg);
     }
-  }, [
+  }), [
     addDebugLog,
+    runAudioTest,
     settings.ttsLanguage,
     settings.ttsNativeVoiceId,
     settings.ttsPitch,
@@ -392,7 +413,7 @@ export const DebugScreen: React.FC = () => {
     settings.ttsVoice,
   ]);
 
-  const handleSttTest = useCallback(async () => {
+  const handleSttTest = useCallback(() => runAudioTest('el reconocimiento de voz', async () => {
     setSttState('running');
     setSttTranscript('');
     addDebugLog('STT test started');
@@ -414,18 +435,17 @@ export const DebugScreen: React.FC = () => {
       const msg = error instanceof Error ? error.message : String(error);
       setSttState('error');
       addDebugLog(`STT test failed: ${msg}`, 'error');
-      Alert.alert('STT error', msg);
+      Alert.alert('Error de reconocimiento', msg);
       STTService.cancel();
     }
-  }, [addDebugLog, settings.sttStopTimeoutMs, settings.wakeWordLang]);
+  }), [addDebugLog, runAudioTest, settings.sttStopTimeoutMs, settings.wakeWordLang]);
 
-  const handleSmokeTest = useCallback(async () => {
+  const handleSmokeTest = useCallback(() => runAudioTest('el test rápido', async () => {
     setSmokeState('running');
     addDebugLog('Smoke test started');
     try {
       const status = BluetoothService.getBluetoothStatus();
       addDebugLog(`BLE status: available=${status.bleAvailable}, connected=${status.isConnected}, device=${status.deviceName || 'none'}`);
-      BluetoothService.notifyButtonPress();
       await AudioService.prepareForPlayback();
       await TTSService.synthesize('Test rapido de diagnostico.', 'native', 'native-ios', { language: 'es-ES', rate: 1.1 });
       setSmokeState('ok');
@@ -434,9 +454,9 @@ export const DebugScreen: React.FC = () => {
       const msg = error instanceof Error ? error.message : String(error);
       setSmokeState('error');
       addDebugLog(`Smoke test failed: ${msg}`, 'error');
-      Alert.alert('Smoke test error', msg);
+      Alert.alert('Error en el test rápido', msg);
     }
-  }, [addDebugLog]);
+  }), [addDebugLog, runAudioTest]);
 
   const handleExportLogs = useCallback(async () => {
     try {
@@ -462,19 +482,13 @@ export const DebugScreen: React.FC = () => {
   const pipelineSummary = currentTranscription || interimTranscription || currentResponse || 'Sin turno activo';
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
       <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.header}>
-          <View style={styles.headerIcon}>
-            <Icon name="bug-check-outline" size={26} color={COLORS.primary} />
-          </View>
-          <View style={styles.headerText}>
-            <Text style={styles.title}>Diagnóstico</Text>
-            <Text style={styles.subtitle} numberOfLines={2}>
-              BLE, audio, STT/TTS y logs técnicos en un solo panel.
-            </Text>
-          </View>
-        </View>
+        <ScreenHeader
+          title="Diagnóstico"
+          subtitle="Bluetooth, audio, voz y registros técnicos en un solo panel."
+          icon="bug-check-outline"
+        />
 
         <View style={styles.statusGrid}>
           <StatusPill
@@ -541,7 +555,7 @@ export const DebugScreen: React.FC = () => {
             <Icon name="camera-iris" size={20} color={COLORS.accent} />
             <Text style={styles.panelTitle}>Laboratorio botones cámara</Text>
           </View>
-          <Text style={styles.hint}>
+          <Text style={[styles.hint, styles.hintBlock]}>
             Pulsa "Capturar foto" y toca el botón físico de foto varias veces. Luego haz lo mismo con vídeo. La app guardará UUID, bytes y firma para distinguirlos.
           </Text>
 
@@ -655,7 +669,7 @@ export const DebugScreen: React.FC = () => {
             tone="success"
           />
           <Text style={styles.hint}>
-            Último estado: {smokeState}. Usa TTS nativo y simula una pulsación BLE.
+            Último estado: {smokeState}. Comprueba el estado BLE y reproduce una frase con la voz nativa.
           </Text>
           <Text style={styles.pipelineText} numberOfLines={3}>{pipelineSummary}</Text>
         </View>
@@ -696,38 +710,8 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
   },
   content: {
-    padding: 16,
+    paddingHorizontal: 16,
     paddingBottom: 42,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 14,
-  },
-  headerIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: `${COLORS.primary}12`,
-    borderWidth: 1,
-    borderColor: `${COLORS.primary}35`,
-  },
-  headerText: {
-    flex: 1,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: COLORS.text,
-  },
-  subtitle: {
-    fontSize: 12,
-    color: COLORS.textSecondary,
-    lineHeight: 17,
-    marginTop: 2,
   },
   statusGrid: {
     flexDirection: 'row',
@@ -737,9 +721,10 @@ const styles = StyleSheet.create({
   },
   statusPill: {
     width: '48.5%',
+    flexGrow: 1,
     minHeight: 58,
-    backgroundColor: COLORS.surface,
-    borderRadius: 8,
+    backgroundColor: COLORS.card,
+    borderRadius: RADIUS.md,
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderWidth: 1,
@@ -756,8 +741,8 @@ const styles = StyleSheet.create({
     marginTop: 5,
   },
   panel: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 10,
+    backgroundColor: COLORS.card,
+    borderRadius: RADIUS.lg,
     padding: 14,
     marginBottom: 14,
     borderWidth: 1,
@@ -790,12 +775,12 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 10,
     paddingVertical: 9,
-    borderRadius: 8,
-    backgroundColor: COLORS.background,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.surface,
     borderWidth: 1,
   },
   debugButtonDisabled: {
-    opacity: 0.5,
+    opacity: 0.45,
   },
   debugButtonText: {
     fontSize: 13,
@@ -833,6 +818,10 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     marginTop: 10,
   },
+  hintBlock: {
+    marginTop: 0,
+    marginBottom: 12,
+  },
   subPanelTitle: {
     fontSize: 12,
     color: COLORS.text,
@@ -858,7 +847,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: COLORS.textSecondary,
     lineHeight: 16,
-    fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'Courier' }),
+    fontFamily: MONO_FONT,
   },
   buttonEventRow: {
     padding: 10,
@@ -889,13 +878,13 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: COLORS.text,
     lineHeight: 15,
-    fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'Courier' }),
+    fontFamily: MONO_FONT,
   },
   buttonEventBytes: {
     fontSize: 10,
     color: COLORS.textSecondary,
     marginTop: 5,
-    fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'Courier' }),
+    fontFamily: MONO_FONT,
   },
   resultText: {
     fontSize: 12,
@@ -935,12 +924,12 @@ const styles = StyleSheet.create({
   logLevel: {
     fontSize: 10,
     fontWeight: '900',
-    fontFamily: 'Courier',
+    fontFamily: MONO_FONT,
   },
   logTag: {
     fontSize: 10,
     color: COLORS.textSecondary,
-    fontFamily: 'Courier',
+    fontFamily: MONO_FONT,
   },
   logTime: {
     marginLeft: 'auto',
@@ -951,5 +940,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: COLORS.text,
     lineHeight: 16,
+    fontFamily: MONO_FONT,
   },
 });

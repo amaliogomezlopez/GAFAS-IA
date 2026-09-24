@@ -181,6 +181,12 @@ export const GrokVoice = {
         LogService.error('GrokVoice', `Realtime error: ${message}`);
         callbacks.onError?.(message);
       },
+      onClosed: () => {
+        LogService.warn('GrokVoice', 'Realtime socket closed unexpectedly — ending session');
+        const onStateChange = callbacks.onStateChange;
+        callbacks.onError?.('La sesión de Grok se ha cerrado. Pulsa de nuevo para reconectar.');
+        GrokVoice.stopSession().finally(() => onStateChange?.('idle'));
+      },
     });
 
     // 3) Open the WebSocket to x.ai.

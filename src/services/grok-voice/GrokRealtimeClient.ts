@@ -33,6 +33,8 @@ export interface GrokRealtimeCallbacks {
   /** User stopped speaking (VAD). */
   onSpeechStopped?: () => void;
   onError?: (message: string) => void;
+  /** The socket closed without disconnect() being called. */
+  onClosed?: () => void;
 }
 
 /**
@@ -101,9 +103,16 @@ export class GrokRealtimeClient {
       ws.onclose = (event) => {
         LogService.info('GrokRealtime', `WS closed (code=${event.code} reason="${event.reason ?? ''}")`);
         this.clearPing();
-        if (this.state !== 'error') {
-          this.setState('connected'); // still surface as idle; orchestrator decides next move
+        if (this.ws !== ws) return; // closed by disconnect()/closeExisting()
+        this.ws = null;
+        if (!opened) {
+          reject(new Error('Grok cerró la conexión antes de empezar. Revisa el token o el modelo.'));
+          return;
         }
+        // Unexpected close (token expired, server hang-up…): let the
+        // orchestrator tear the audio session down instead of pretending
+        // the session is still live.
+        this.callbacks.onClosed?.();
       };
     });
   }

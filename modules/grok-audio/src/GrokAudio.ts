@@ -11,6 +11,8 @@ type GrokAudioNative = {
   startCapture(): boolean;
   stopCapture(): void;
   enqueueAudio(base64: string): Promise<boolean>;
+  /** Added after the first native build; may be missing on older installs. */
+  getBufferedDurationMs?(): number;
   interrupt(): void;
   setMuted(muted: boolean): void;
   addListener(eventName: string, listener: (event: any) => void): { remove(): void };
@@ -89,6 +91,19 @@ export const GrokAudio = {
   },
   enqueueAudio(base64: string): Promise<boolean> {
     return this._ensure().enqueueAudio(base64);
+  },
+  /**
+   * Milliseconds of audio still queued in the native player, or -1 when the
+   * installed native build doesn't support the query (or isn't available).
+   */
+  getBufferedDurationMs(): number {
+    const native = _native ?? loadNative();
+    if (!native?.getBufferedDurationMs) return -1;
+    try {
+      return native.getBufferedDurationMs();
+    } catch {
+      return -1;
+    }
   },
   interrupt(): void {
     this._ensure().interrupt();

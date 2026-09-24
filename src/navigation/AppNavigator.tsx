@@ -7,10 +7,26 @@ import { HistoryScreen } from '../screens/History';
 import { SettingsScreen } from '../screens/Settings';
 import { ProfileScreen } from '../screens/Profile';
 import { DebugScreen } from '../screens/Debug';
-import { COLORS } from '../constants';
+import { COLORS, withAlpha } from '../constants';
 import { useAppStore } from '../stores';
 
 const Tab = createBottomTabNavigator();
+
+/** Home icon with a live dot while KAIRO is listening, thinking or talking. */
+const HomeTabIcon: React.FC<{ color: string; size: number }> = ({ color, size }) => {
+  const pipelineState = useAppStore((s) => s.pipelineState);
+  const busyColor =
+    pipelineState === 'listening' ? COLORS.listening :
+    pipelineState === 'processing' ? COLORS.processing :
+    pipelineState === 'speaking' ? COLORS.speaking :
+    null;
+  return (
+    <View>
+      <Icon name="shield-half-full" size={size} color={color} />
+      {busyColor ? <View style={[tabIconStyles.liveDot, { backgroundColor: busyColor }]} /> : null}
+    </View>
+  );
+};
 
 const ProfileTabIcon: React.FC<{ color: string; size: number }> = ({ color, size }) => {
   const photoUri = useAppStore((s) => s.userProfile.photoUri);
@@ -38,6 +54,16 @@ const tabIconStyles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  liveDot: {
+    position: 'absolute',
+    top: -1,
+    right: -3,
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: COLORS.card,
+  },
 });
 
 export const AppNavigator: React.FC = () => {
@@ -45,30 +71,29 @@ export const AppNavigator: React.FC = () => {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
+        // Height/padding come from the safe-area insets; hard-coding them
+        // broke the layout on devices without a home indicator and on Android.
         tabBarStyle: {
-          backgroundColor: COLORS.surface,
+          backgroundColor: COLORS.card,
           borderTopColor: COLORS.border,
           borderTopWidth: 1,
-          height: 85,
-          paddingBottom: 25,
-          paddingTop: 8,
         },
         tabBarActiveTintColor: COLORS.primary,
-        tabBarInactiveTintColor: COLORS.textSecondary,
+        tabBarInactiveTintColor: COLORS.textMuted,
+        tabBarActiveBackgroundColor: withAlpha(COLORS.primary, 0.06),
         tabBarLabelStyle: {
           fontSize: 11,
-          fontWeight: '600',
+          fontWeight: '700',
         },
+        tabBarHideOnKeyboard: true,
       }}
     >
       <Tab.Screen
         name="Home"
         component={HomeScreen}
         options={{
-          tabBarLabel: 'Inicio',
-          tabBarIcon: ({ color, size }) => (
-            <Icon name="home" size={size} color={color} />
-          ),
+          tabBarLabel: 'KAIRO',
+          tabBarIcon: ({ color, size }) => <HomeTabIcon color={color} size={size} />,
         }}
       />
       <Tab.Screen
@@ -77,7 +102,7 @@ export const AppNavigator: React.FC = () => {
         options={{
           tabBarLabel: 'Historial',
           tabBarIcon: ({ color, size }) => (
-            <Icon name="history" size={size} color={color} />
+            <Icon name="message-text-clock-outline" size={size} color={color} />
           ),
         }}
       />
@@ -87,7 +112,7 @@ export const AppNavigator: React.FC = () => {
         options={{
           tabBarLabel: 'Ajustes',
           tabBarIcon: ({ color, size }) => (
-            <Icon name="cog" size={size} color={color} />
+            <Icon name="tune-variant" size={size} color={color} />
           ),
         }}
       />

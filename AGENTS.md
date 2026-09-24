@@ -18,7 +18,8 @@ Known remaining behavior being tuned:
 - The remote proxy should be configured with `EXPO_PUBLIC_PROXY_BASE_URL` and served from private deployment infrastructure. It proxies OpenCode/Hermes and Kokoro TTS so provider keys stay server-side.
 - Chrome/web is not reliable for voice testing. Web Speech plus microphone routing caused hangs and `Failed to fetch`/CORS issues. Prefer iPhone direct install for voice QA.
 - OpenCode reasoning models can return HTTP 200 with empty `message.content` if `max_tokens` is too low. Keep the OpenCode runtime minimum high enough for reasoning models; current minimum is 1024 tokens.
-- The default LLM request timeout is now 22000ms and older saved settings below that value are migrated upward on load.
+- The default LLM request timeout is 90000ms. Settings migrations are one-shot and gated by `settingsVersion` (`SETTINGS_SCHEMA_VERSION` in `src/stores/useAppStore.ts`); bump it and add a guarded block when a new migration is needed, never run migrations unconditionally on every load.
+- The turn timeout only aborts before audio starts (plus one extension while speaking) so answers are not cut mid-sentence.
 
 ## Product Identity
 
@@ -44,6 +45,8 @@ Known remaining behavior being tuned:
   - `src/services/LogService.ts`: in-app logs, persisted for diagnostics.
   - `src/screens/Home/HomeScreen.tsx`: main chat and voice UI.
   - `src/screens/Settings/SettingsScreen.tsx`: settings, diagnostics, logs.
+  - `src/components/ui.tsx`: shared UI kit (Card, Button, OptionGroup, ToggleRow, ScreenHeader…). Use it plus the tokens in `src/constants` (`COLORS`, `RADIUS`, `withAlpha`) instead of ad-hoc styles.
+  - `src/services/ai/speechText.ts`: strips Markdown/emojis/URLs before any TTS.
 
 ## Voice Details
 
@@ -55,6 +58,8 @@ Known remaining behavior being tuned:
 - `STTService` intentionally does not use persisted recording options on native iOS, because the wake listener transcribed correctly without them and the persisted recording path interfered with the main recognizer.
 - `WakeWordService` logs throttled mic volume and heard hypotheses on native iOS for diagnostics. This is expected and useful when testing wake word sensitivity.
 - OpenCode responses must be parsed from visible answer fields only. Do not use `reasoning_content` as the assistant reply.
+- The LLM receives the last 6 turns of the active chat as context, except Hermes, which keeps its own server-side session via `X-Hermes-Session-Key`.
+- `expo-grok-audio` exposes `getBufferedDurationMs()`; `StreamingTtsPlayer.finish()` waits for the native buffer to drain before the session is torn down. Older native builds return -1 and fall back to a duration estimate.
 - Useful logs in Settings -> Diagnósticos -> Logs:
   - `WakeWord`: wake phrase detection.
   - `STT`: permissions, audio start/end, speech start/end, transcript.

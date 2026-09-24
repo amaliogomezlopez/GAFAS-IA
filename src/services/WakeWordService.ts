@@ -32,6 +32,8 @@ type WakeWordConfig = {
 
 let isActive = false;
 let isPaused = false;
+/** Bumped by stop() so a start() still awaiting permissions can bail out. */
+let startGeneration = 0;
 let wakePhrase = 'kairo';
 let wakeLang = 'es-ES';
 let onWake: WakeCallback | null = null;
@@ -91,6 +93,18 @@ function normalize(text: string): string {
     .trim();
 }
 
+/** Phonetic variants Apple Speech commonly returns for the wake words. */
+const PHONETIC_VARIANTS: Record<string, string[]> = {
+  'aimbi': ['aimbi', 'aimbee', 'aimby', 'aimebi', 'eimbi', 'einbi', 'ambi', 'aimb'],
+  'aimb': ['aimb', 'aimbi', 'aimbee', 'aimebi', 'eimbi', 'einbi', 'ambi'],
+  'kairo': ['kairo', 'cairo', 'cayro', 'kaido', 'cairoh', 'kayro', 'quiro', 'kiro'],
+  'sibel': ['sibel', 'sivel', 'cibel', 'si bel'],
+  'nexo': ['nexo', 'neso', 'anexo'],
+  's1': ['s1', 'ese uno', 's uno', 'es uno'],
+  'glasses': ['glasses', 'glases', 'grases'],
+  'gafas': ['gafas', 'gafa'],
+};
+
 function wordMatches(transcriptWord: string, phraseWord: string): boolean {
   if (transcriptWord === phraseWord) return true;
   if (transcriptWord.length >= 4 && transcriptWord.includes(phraseWord)) return true;
@@ -122,18 +136,7 @@ function fuzzyMatch(transcript: string, phrase: string): boolean {
   );
   if (matched) return true;
 
-  // Phonetic variants for common wake words
-  const variants: Record<string, string[]> = {
-    'aimbi': ['aimbi', 'aimbee', 'aimby', 'aimebi', 'eimbi', 'einbi', 'ambi', 'aimb'],
-    'aimb': ['aimb', 'aimbi', 'aimbee', 'aimebi', 'eimbi', 'einbi', 'ambi'],
-    'kairo': ['kairo', 'cairo', 'cayro', 'kaido', 'cairoh', 'kayro', 'quiro', 'kiro'],
-    'sibel': ['sibel', 'sivel', 'cibel', 'si bel'],
-    'nexo': ['nexo', 'neso', 'anexo'],
-    's1': ['s1', 'ese uno', 's uno', 'es uno'],
-    'glasses': ['glasses', 'glases', 'grases'],
-    'gafas': ['gafas', 'gafa'],
-  };
-  for (const [word, alts] of Object.entries(variants)) {
+  for (const [word, alts] of Object.entries(PHONETIC_VARIANTS)) {
     const phraseWord = phraseWords.find((w) => w === word || w.includes(word) || alts.includes(w));
     if (phraseWord) {
       const others = phraseWords.filter(w => w !== phraseWord);
@@ -148,10 +151,16 @@ function fuzzyMatch(transcript: string, phrase: string): boolean {
 }
 
 function extractInlineCommand(transcript: string, phrase: string): string | undefined {
-  const index = transcript.indexOf(phrase);
-  if (index < 0) return undefined;
-  const command = transcript.slice(index + phrase.length).trim();
-  return command.length >= 3 ? command : undefined;
+  // Match the exact phrase first, then any accepted phonetic variant
+  // ("cairo, qué hora es" should behave like "kairo, qué hora es").
+  const candidates = [phrase, ...(PHONETIC_VARIANTS[phrase] ?? [])];
+  for (const candidate of candidates) {
+    const match = new RegExp(`(?:^|\\s)${candidate}(?:\\s|$)`).exec(transcript);
+    if (!match) continue;
+    const command = transcript.slice(match.index + match[0].length).trim();
+    return command.length >= 3 ? command : undefined;
+  }
+  return undefined;
 }
 
 function logWakeHypothesis(originalTranscript: string, normalizedTranscript: string): void {
@@ -188,13 +197,21 @@ export const WakeWordService = {
       return;
     }
 
+    const generation = ++startGeneration;
     const { granted } = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (generation !== startGeneration || isActive) return;
     if (!granted) {
       LogService.warn('WakeWord', 'Speech recognition permission denied');
       return;
     }
 
-    wakePhrase = normalize(phrase);
+    const normalizedPhrase = normalize(phrase);
+    if (!normalizedPhrase) {
+      // An empty phrase would match every transcript and trigger constantly.
+      LogService.warn('WakeWord', 'Empty wake phrase; wake word disabled');
+      return;
+    }
+    wakePhrase = normalizedPhrase;
     wakeLang = lang || 'es-ES';
     onWake = callback;
     if (config) {
@@ -427,11 +444,18 @@ export const WakeWordService = {
     cooldownUntil = Date.now() + cooldownMs;
     LogService.debug('WakeWord', `Resuming with ${cooldownMs}ms cooldown`);
     if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
-    restartTimer = setTimeout(() => this._startRecognition(), delayMs);
+    // The timer must clear itself: scheduleRestart() refuses to schedule while
+    // restartTimer is set, so a stale handle here silently killed every later
+    // restart and the wake word stopped responding after the first turn.
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      this._startRecognition();
+    }, delayMs);
   },
 
   /** Completely stop wake word detection */
   stop(): void {
+    startGeneration += 1;
     isActive = false;
     isPaused = false;
     onWake = null;

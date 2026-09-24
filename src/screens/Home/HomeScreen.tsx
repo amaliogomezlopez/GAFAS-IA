@@ -1,407 +1,372 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TextInput,
-  TouchableOpacity,
-  Keyboard,
-  Modal,
-  FlatList,
   ActivityIndicator,
+  Alert,
   Animated,
+  Easing,
+  FlatList,
+  Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Pressable,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
-import { COLORS, LLM_MODELS, PERSONALITY_PRESETS, TTS_VOICES } from '../../constants';
+import { COLORS, LLM_MODELS, RADIUS, SPACING, TTS_VOICES, withAlpha } from '../../constants';
 import { useAppStore } from '../../stores';
 import { useBluetooth } from '../../hooks/useBluetooth';
 import { usePipeline } from '../../hooks/usePipeline';
 import { useGrokVoice } from '../../hooks/useGrokVoice';
-import { StatusBar } from '../../components/StatusBar';
-import type { ConversationEntry } from '../../types';
+import { Button, IconButton, Pill } from '../../components';
+import { formatSeconds, formatTime } from '../../utils/format';
+import type { AppState, ConversationEntry } from '../../types';
+
+type IconName = React.ComponentProps<typeof Icon>['name'];
 
 interface BLEDevice {
   id: string;
   name: string | null;
 }
 
-/* ─── Arc Reactor Core ─────────────────────────── */
-const ArcReactor: React.FC<{ state: string }> = ({ state }) => {
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const glowAnim = useRef(new Animated.Value(0.3)).current;
-  const rotateAnim = useRef(new Animated.Value(0)).current;
+const STATE_COLOR: Record<AppState, string> = {
+  idle: COLORS.primary,
+  listening: COLORS.listening,
+  processing: COLORS.processing,
+  speaking: COLORS.speaking,
+  error: COLORS.error,
+};
 
-  const color =
-    state === 'listening' ? COLORS.listening :
-    state === 'processing' ? COLORS.processing :
-    state === 'speaking' ? COLORS.speaking :
-    COLORS.primary;
+const STATE_ICON: Record<AppState, IconName> = {
+  idle: 'shield-half-full',
+  listening: 'microphone',
+  processing: 'brain',
+  speaking: 'volume-high',
+  error: 'alert-circle-outline',
+};
+
+const SUGGESTIONS = [
+  '¿Qué tiempo hará hoy?',
+  'Recuérdame beber agua en una hora',
+  'Resume las noticias de hoy',
+  'Tradúceme “¿dónde está la estación?” al inglés',
+];
+
+/* ─── Arc Reactor Core ─────────────────────────── */
+const ArcReactor: React.FC<{ state: AppState; size?: number }> = ({ state, size = 168 }) => {
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const glowAnim = useRef(new Animated.Value(0.35)).current;
+  const rotateAnim = useRef(new Animated.Value(0)).current;
+  const color = STATE_COLOR[state];
 
   useEffect(() => {
-    if (Platform.OS === 'web' && state === 'idle') {
-      glowAnim.setValue(0.45);
-      pulseAnim.setValue(1);
-      rotateAnim.setValue(0);
-      return undefined;
-    }
+    const loops: Animated.CompositeAnimation[] = [];
+    const loop = (animation: Animated.CompositeAnimation) => {
+      const looped = Animated.loop(animation);
+      loops.push(looped);
+      looped.start();
+    };
+    const timing = (value: Animated.Value, toValue: number, duration: number) =>
+      Animated.timing(value, { toValue, duration, easing: Easing.inOut(Easing.quad), useNativeDriver: true });
 
-    if (state === 'idle') {
-      // Gentle breathing
-      const breathe = Animated.loop(
-        Animated.sequence([
-          Animated.timing(glowAnim, { toValue: 0.6, duration: 2000, useNativeDriver: true }),
-          Animated.timing(glowAnim, { toValue: 0.3, duration: 2000, useNativeDriver: true }),
-        ]),
-      );
-      breathe.start();
-      pulseAnim.setValue(1);
-      return () => breathe.stop();
-    }
-    if (state === 'listening') {
-      const pulse = Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 1.12, duration: 500, useNativeDriver: true }),
-          Animated.timing(pulseAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
-        ]),
-      );
-      const glow = Animated.loop(
-        Animated.sequence([
-          Animated.timing(glowAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-          Animated.timing(glowAnim, { toValue: 0.5, duration: 400, useNativeDriver: true }),
-        ]),
-      );
-      pulse.start();
-      glow.start();
-      return () => { pulse.stop(); glow.stop(); };
-    }
-    if (state === 'processing') {
-      const spin = Animated.loop(
-        Animated.timing(rotateAnim, { toValue: 1, duration: 2000, useNativeDriver: true }),
-      );
-      spin.start();
-      glowAnim.setValue(0.8);
-      pulseAnim.setValue(1);
-      return () => { spin.stop(); rotateAnim.setValue(0); };
-    }
-    if (state === 'speaking') {
-      const pulse = Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 1.06, duration: 300, useNativeDriver: true }),
-          Animated.timing(pulseAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
-        ]),
-      );
-      pulse.start();
+    pulseAnim.setValue(1);
+    rotateAnim.setValue(0);
+
+    if (state === 'idle' || state === 'error') {
+      loop(Animated.sequence([timing(glowAnim, 0.7, 2200), timing(glowAnim, 0.3, 2200)]));
+      // Slow drift of the dashed ring keeps the idle screen alive without distracting.
+      loop(Animated.timing(rotateAnim, { toValue: 1, duration: 24000, easing: Easing.linear, useNativeDriver: true }));
+    } else if (state === 'listening') {
+      loop(Animated.sequence([timing(pulseAnim, 1.1, 520), timing(pulseAnim, 1, 520)]));
+      loop(Animated.sequence([timing(glowAnim, 1, 420), timing(glowAnim, 0.5, 420)]));
+    } else if (state === 'processing') {
+      glowAnim.setValue(0.85);
+      loop(Animated.timing(rotateAnim, { toValue: 1, duration: 1600, easing: Easing.linear, useNativeDriver: true }));
+    } else if (state === 'speaking') {
       glowAnim.setValue(0.9);
-      return () => pulse.stop();
+      loop(Animated.sequence([timing(pulseAnim, 1.06, 300), timing(pulseAnim, 1, 300)]));
     }
-  }, [state]);
+    return () => loops.forEach((animation) => animation.stop());
+  }, [state, glowAnim, pulseAnim, rotateAnim]);
 
   const rotate = rotateAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  const mid = size * 0.78;
+  const core = size * 0.5;
 
   return (
-    <View style={arcStyles.wrapper}>
-      {/* Outer glow ring */}
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
       <Animated.View
         style={[
-          arcStyles.glowRing,
-          { borderColor: color, opacity: glowAnim, transform: [{ scale: pulseAnim }] },
+          arcStyles.ring,
+          {
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+            borderColor: color,
+            backgroundColor: withAlpha(color, 0.04),
+            opacity: glowAnim,
+            transform: [{ scale: pulseAnim }],
+          },
         ]}
       />
-      {/* Mid ring */}
       <Animated.View
         style={[
-          arcStyles.midRing,
-          { borderColor: color, transform: [{ rotate }, { scale: pulseAnim }] },
+          arcStyles.ring,
+          arcStyles.dashed,
+          { width: mid, height: mid, borderRadius: mid / 2, borderColor: withAlpha(color, 0.8), transform: [{ rotate }] },
         ]}
       >
-        <View style={[arcStyles.midRingNotch, { backgroundColor: color }]} />
-        <View style={[arcStyles.midRingNotch, arcStyles.midRingNotch2, { backgroundColor: color }]} />
+        <View style={[arcStyles.notch, { backgroundColor: color, top: -4 }]} />
+        <View style={[arcStyles.notch, { backgroundColor: color, bottom: -4 }]} />
       </Animated.View>
-      {/* Core */}
       <Animated.View
-        style={[arcStyles.core, { backgroundColor: `${color}20`, borderColor: color, transform: [{ scale: pulseAnim }] }]}
+        style={[
+          arcStyles.core,
+          {
+            width: core,
+            height: core,
+            borderRadius: core / 2,
+            borderColor: color,
+            backgroundColor: withAlpha(color, 0.14),
+            shadowColor: color,
+            transform: [{ scale: pulseAnim }],
+          },
+        ]}
       >
-        <Icon
-          name={
-            state === 'listening' ? 'microphone' :
-            state === 'processing' ? 'brain' :
-            state === 'speaking' ? 'volume-high' :
-            'shield-half-full'
-          }
-          size={32}
-          color={color}
-        />
+        <Icon name={STATE_ICON[state]} size={core * 0.42} color={color} />
       </Animated.View>
     </View>
   );
 };
 
 const arcStyles = StyleSheet.create({
-  wrapper: {
-    width: 140,
-    height: 140,
+  ring: {
+    position: 'absolute',
+    borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  glowRing: {
-    position: 'absolute',
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    borderWidth: 1.5,
-  },
-  midRing: {
-    position: 'absolute',
-    width: 110,
-    height: 110,
-    borderRadius: 55,
+  dashed: {
     borderWidth: 2,
     borderStyle: 'dashed',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
-  midRingNotch: {
+  notch: {
     position: 'absolute',
     width: 8,
     height: 8,
     borderRadius: 4,
-    top: -4,
-  },
-  midRingNotch2: {
-    top: undefined,
-    bottom: -4,
   },
   core: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
     borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowOpacity: 0.6,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 8,
   },
 });
 
-/* ─── Latency HUD ─────────────────────────── */
-const LatencyHUD: React.FC = () => {
-  const latencyMetrics = useAppStore((s) => s.latencyMetrics);
-  if (!latencyMetrics) return null;
-
-  const items = [
-    { label: 'STT', value: latencyMetrics.sttMs, color: COLORS.listening },
-    { label: 'LLM', value: latencyMetrics.llmMs, color: COLORS.processing },
-    { label: 'TTS', value: latencyMetrics.ttsMs, color: COLORS.speaking },
-  ];
-
+/* ─── Chat bubbles ─────────────────────────── */
+const Bubble: React.FC<{
+  role: 'user' | 'assistant';
+  label: string;
+  text: string;
+  time?: number;
+  pending?: boolean;
+}> = ({ role, label, text, time, pending }) => {
+  const isUser = role === 'user';
+  const handleLongPress = () => {
+    if (!text) return;
+    Share.share({ message: text }).catch(() => {});
+  };
   return (
-    <View style={hudStyles.row}>
-      {items.map((item) => (
-        <View key={item.label} style={hudStyles.item}>
-          <Text style={[hudStyles.label, { color: item.color }]}>{item.label}</Text>
-          <Text style={hudStyles.value}>
-            {item.value != null ? `${(item.value / 1000).toFixed(1)}s` : '–'}
-          </Text>
-        </View>
-      ))}
-      <View style={hudStyles.item}>
-        <Text style={[hudStyles.label, { color: COLORS.accent }]}>TOT</Text>
-        <Text style={[hudStyles.value, { color: COLORS.accent }]}>
-          {latencyMetrics.totalMs != null ? `${(latencyMetrics.totalMs / 1000).toFixed(1)}s` : '–'}
-        </Text>
+    <Pressable
+      onLongPress={handleLongPress}
+      delayLongPress={350}
+      accessibilityHint="Mantén pulsado para compartir el mensaje"
+      style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAI]}
+    >
+      <View style={styles.bubbleMeta}>
+        <Text style={[styles.bubbleLabel, { color: isUser ? COLORS.textSecondary : COLORS.primary }]}>{label}</Text>
+        {time ? <Text style={styles.bubbleTime}>{formatTime(time)}</Text> : null}
       </View>
+      <Text style={[styles.bubbleText, pending && styles.bubbleTextPending]} selectable>
+        {text}
+      </Text>
+    </Pressable>
+  );
+};
+
+const TypingDots: React.FC<{ color: string }> = ({ color }) => {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(anim, { toValue: 1, duration: 1100, easing: Easing.linear, useNativeDriver: true }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [anim]);
+  return (
+    <View style={styles.typingRow}>
+      {[0, 1, 2].map((index) => (
+        <Animated.View
+          key={index}
+          style={[
+            styles.typingDot,
+            {
+              backgroundColor: color,
+              opacity: anim.interpolate({
+                inputRange: [0, 0.2 + index * 0.2, 0.4 + index * 0.2, 1],
+                outputRange: [0.25, 1, 0.25, 0.25],
+                extrapolate: 'clamp',
+              }),
+            },
+          ]}
+        />
+      ))}
     </View>
   );
 };
 
-const hudStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 16,
-    marginTop: 8,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    backgroundColor: COLORS.surface,
-    borderRadius: 8,
-    alignSelf: 'center',
-  },
-  item: { alignItems: 'center' },
-  label: { fontSize: 9, fontWeight: '700', letterSpacing: 1 },
-  value: { fontSize: 12, color: COLORS.text, fontWeight: '600', marginTop: 1 },
-});
-
-const CockpitCell: React.FC<{ icon: string; label: string; value: string; tone?: string }> = ({ icon, label, value, tone }) => (
-  <View style={cockpitStyles.cell}>
-    <Icon name={icon as any} size={16} color={tone || COLORS.textSecondary} />
-    <Text style={cockpitStyles.cellLabel}>{label}</Text>
-    <Text style={[cockpitStyles.cellValue, tone ? { color: tone } : null]} numberOfLines={1}>{value}</Text>
-  </View>
-);
-
-const cockpitStyles = StyleSheet.create({
-  grid: {
-    width: '100%',
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 18,
-  },
-  cell: {
-    width: '48%',
-    minHeight: 70,
-    backgroundColor: COLORS.surface,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 10,
-    justifyContent: 'space-between',
-  },
-  cellLabel: {
-    fontSize: 9,
-    color: COLORS.textMuted,
-    fontWeight: '800',
-    marginTop: 6,
-  },
-  cellValue: {
-    fontSize: 12,
-    color: COLORS.text,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  liveStrip: {
-    marginHorizontal: 16,
-    marginBottom: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 8,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    gap: 8,
-  },
-  stepRow: {
-    flexDirection: 'row',
-    gap: 6,
-  },
-  step: {
-    flex: 1,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: COLORS.border,
-  },
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  metaText: {
-    flex: 1,
-    color: COLORS.textSecondary,
-    fontSize: 11,
-    fontWeight: '700',
-  },
-});
-
-/* ─── State Label ─────────────────────────── */
-const STATE_LABELS: Record<string, { label: string; sub: string }> = {
-  idle: { label: 'En espera', sub: 'Di la palabra de activación o pulsa el reactor' },
-  listening: { label: 'Escuchando', sub: 'Habla ahora — se parará al detectar silencio' },
-  processing: { label: 'Procesando', sub: 'Analizando con IA...' },
-  speaking: { label: 'Hablando', sub: 'Di KAIRO para interrumpir' },
-};
-
-const STATE_ORDER = ['listening', 'processing', 'speaking'];
-
 /* ─── Home Screen ─────────────────────────── */
 export const HomeScreen: React.FC = () => {
-  const {
-    pipelineState,
-    currentTranscription,
-    interimTranscription,
-    currentResponse,
-    error,
-    isBluetoothConnected,
-    bluetoothDeviceName,
-    bluetoothBattery,
-    settings,
-    chatSessions,
-    activeSessionId,
-    clearError,
-  } = useAppStore();
+  const pipelineState = useAppStore((s) => s.pipelineState);
+  const currentTranscription = useAppStore((s) => s.currentTranscription);
+  const interimTranscription = useAppStore((s) => s.interimTranscription);
+  const currentResponse = useAppStore((s) => s.currentResponse);
+  const error = useAppStore((s) => s.error);
+  const isBluetoothConnected = useAppStore((s) => s.isBluetoothConnected);
+  const bluetoothDeviceName = useAppStore((s) => s.bluetoothDeviceName);
+  const bluetoothBattery = useAppStore((s) => s.bluetoothBattery);
+  const settings = useAppStore((s) => s.settings);
+  const latencyMetrics = useAppStore((s) => s.latencyMetrics);
+  const activeSession = useAppStore((s) => s.chatSessions.find((session) => session.id === s.activeSessionId));
+  const clearError = useAppStore((s) => s.clearError);
+  const setActiveSession = useAppStore((s) => s.setActiveSession);
 
+  const insets = useSafeAreaInsets();
   const { scanForDevices, connectToDevice, disconnect, isScanning, isAutoConnecting, bleAvailable } = useBluetooth();
-  const { startListening, stopListeningAndProcess, sendTextMessage, forceStop, interruptAndListen } = usePipeline();
-  const { startSession: startGrokSession, stopSession: stopGrokSession, isActive: isGrokActive } = useGrokVoice();
+  const {
+    startSession: startGrokSession,
+    stopSession: stopGrokSession,
+    isActive: isGrokActive,
+  } = useGrokVoice();
+
+  const isGrokMode = settings.voiceMode === 'grok';
+  const handleGrokToggle = useCallback(() => {
+    if (isGrokActive()) stopGrokSession();
+    else startGrokSession();
+  }, [isGrokActive, startGrokSession, stopGrokSession]);
+
+  const {
+    startListening,
+    stopListeningAndProcess,
+    sendTextMessage,
+    cancelListening,
+    forceStop,
+    interruptAndListen,
+  } = usePipeline({ onGrokButtonPress: handleGrokToggle });
+
   const [textInput, setTextInput] = useState('');
   const [showBLEModal, setShowBLEModal] = useState(false);
   const [foundDevices, setFoundDevices] = useState<BLEDevice[]>([]);
   const [connecting, setConnecting] = useState<string | null>(null);
-  const scrollRef = useRef<ScrollView>(null);
 
-  // Get active session entries (oldest first for chat layout)
-  const activeSession = chatSessions.find(s => s.id === activeSessionId);
-  const sessionEntries: ConversationEntry[] = activeSession
-    ? [...activeSession.entries].reverse()
-    : [];
-
-  // KAIRO identity
-  const personality = PERSONALITY_PRESETS.find(p => p.id === settings.personalityId) || PERSONALITY_PRESETS[0];
+  const entries: ConversationEntry[] = activeSession?.entries ?? [];
   const aiLabel = settings.wakeWord.trim().toUpperCase() || 'KAIRO';
-  const modelName = LLM_MODELS.find((model) => model.provider === settings.llmProvider && model.id === settings.llmModel)?.name || settings.llmModel;
-  const voiceName = TTS_VOICES.find((voice) => voice.provider === settings.ttsProvider && voice.id === settings.ttsVoice)?.name || settings.ttsVoice;
-  const activeStepIndex = STATE_ORDER.indexOf(pipelineState);
-  const streamingMode = settings.streamingEnabled && settings.ttsChunkedPlaybackEnabled ? 'Streaming + frases' : settings.streamingEnabled ? 'Streaming' : 'Completa';
+  const modelName = (LLM_MODELS.find((model) => model.provider === settings.llmProvider && model.id === settings.llmModel)?.name
+    || settings.llmModel).replace(/^Hermes \/\s*/, '');
+  const voiceName = isGrokMode
+    ? `Grok · ${settings.grokVoiceId}`
+    : TTS_VOICES.find((voice) => voice.provider === settings.ttsProvider && voice.id === settings.ttsVoice)?.name || settings.ttsVoice;
 
-  const handleReactorPress = () => {
-    clearError();
-    // Grok realtime mode: the reactor toggles the whole voice session.
-    if (settings.voiceMode === 'grok') {
-      if (isGrokActive()) {
-        stopGrokSession();
-      } else if (pipelineState === 'idle') {
-        startGrokSession();
+  const isIdle = pipelineState === 'idle';
+  const stateColor = STATE_COLOR[pipelineState];
+  const hasInProgress = !!(interimTranscription || currentTranscription || currentResponse) || pipelineState === 'processing';
+  const hasConversation = entries.length > 0 || hasInProgress;
+  const grokLive = isGrokMode && isGrokActive();
+
+  const stateCopy = useMemo(() => {
+    if (isGrokMode) {
+      if (grokLive) {
+        return pipelineState === 'speaking'
+          ? { title: 'Grok hablando', sub: 'Habla encima para interrumpir' }
+          : { title: 'Grok en directo', sub: 'Habla con naturalidad · pulsa para terminar' };
       }
+      return { title: 'Grok Realtime', sub: 'Pulsa el micrófono para abrir una sesión de voz' };
+    }
+    switch (pipelineState) {
+      case 'listening': return { title: 'Escuchando', sub: 'Habla ahora · se enviará al detectar silencio' };
+      case 'processing': return { title: 'Pensando', sub: `Consultando ${modelName}` };
+      case 'speaking': return {
+        title: 'Hablando',
+        sub: settings.interruptSpeechWithWakeWord && Platform.OS !== 'web'
+          ? `Di "${aiLabel}" o pulsa el micro para interrumpir`
+          : 'Pulsa el micro para interrumpir',
+      };
+      default: return {
+        title: 'En espera',
+        sub: Platform.OS === 'web'
+          ? 'Pulsa el micrófono o escribe un mensaje'
+          : `Di "${aiLabel}", pulsa el botón de las gafas o el micrófono`,
+      };
+    }
+  }, [aiLabel, grokLive, isGrokMode, modelName, pipelineState, settings.interruptSpeechWithWakeWord]);
+
+  /* ── Actions ── */
+  const handleMicPress = () => {
+    clearError();
+    if (isGrokMode) {
+      if (isIdle || grokLive) handleGrokToggle();
       return;
     }
-    // Pipeline mode (the existing STT → LLM → TTS flow).
     if (pipelineState === 'listening') {
       stopListeningAndProcess();
-    } else if (pipelineState !== 'idle' && settings.interruptSpeechWithButton) {
-      interruptAndListen();
-    } else if (pipelineState === 'idle') {
+    } else if (!isIdle) {
+      if (settings.interruptSpeechWithButton) interruptAndListen();
+      else forceStop();
+    } else {
+      Keyboard.dismiss();
       startListening();
     }
   };
 
-  const handleForceStop = () => {
-    if (settings.voiceMode === 'grok') {
+  const handleStop = () => {
+    if (isGrokMode) {
       stopGrokSession();
       return;
     }
-    forceStop();
+    if (pipelineState === 'listening') cancelListening();
+    else forceStop();
   };
 
-  const handleSendText = () => {
-    const trimmed = textInput.trim();
-    if (!trimmed || pipelineState !== 'idle') return;
+  const handleSendText = (value?: string) => {
+    const trimmed = (value ?? textInput).trim();
+    if (!trimmed || !isIdle) return;
     clearError();
     Keyboard.dismiss();
     setTextInput('');
     sendTextMessage(trimmed);
   };
 
+  const handleNewChat = () => {
+    if (!isIdle) forceStop();
+    setActiveSession(null);
+  };
+
   const handleOpenBLEScan = async () => {
     setShowBLEModal(true);
+    if (isBluetoothConnected) return;
     setFoundDevices([]);
     const devices = await scanForDevices();
-    const mapped: BLEDevice[] = devices
-      .filter((d: any) => d.name)
-      .map((d: any) => ({ id: d.id, name: d.name }));
-    setFoundDevices(mapped);
+    setFoundDevices(devices.filter((d) => d.name).map((d) => ({ id: d.id, name: d.name })));
   };
 
   const handleConnectDevice = async (deviceId: string) => {
@@ -409,397 +374,321 @@ export const HomeScreen: React.FC = () => {
     const ok = await connectToDevice(deviceId);
     setConnecting(null);
     if (ok) setShowBLEModal(false);
+    else Alert.alert('No se pudo conectar', 'Comprueba que las gafas están encendidas y cerca del iPhone.');
   };
 
-  const isInProgress = pipelineState !== 'idle';
-  const hasInProgressContent = !!(interimTranscription || currentTranscription || currentResponse);
-  const hasConversation = sessionEntries.length > 0 || hasInProgressContent || !!error;
-  const canForceStop = pipelineState === 'processing' || pipelineState === 'speaking';
-  const canInterrupt = isInProgress && pipelineState !== 'listening' && settings.interruptSpeechWithButton;
+  const handleDisconnect = () => {
+    Alert.alert('Desconectar gafas', `¿Desconectar ${bluetoothDeviceName || 'las gafas'}?`, [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Desconectar',
+        style: 'destructive',
+        onPress: async () => {
+          await disconnect();
+          setShowBLEModal(false);
+        },
+      },
+    ]);
+  };
 
-  const stateColor =
-    pipelineState === 'listening' ? COLORS.listening :
-    pipelineState === 'processing' ? COLORS.processing :
-    pipelineState === 'speaking' ? COLORS.speaking :
-    COLORS.primary;
+  /* ── Mic button appearance ── */
+  const micConfig: { icon: IconName; color: string; label: string } = (() => {
+    if (isGrokMode) {
+      return grokLive
+        ? { icon: 'phone-hangup', color: COLORS.error, label: 'Terminar sesión Grok' }
+        : { icon: 'lightning-bolt', color: COLORS.accent, label: 'Iniciar sesión Grok' };
+    }
+    switch (pipelineState) {
+      case 'listening': return { icon: 'send', color: COLORS.listening, label: 'Enviar ahora' };
+      case 'processing': return { icon: 'stop', color: COLORS.processing, label: 'Detener' };
+      case 'speaking': return settings.interruptSpeechWithButton
+        ? { icon: 'microphone-message', color: COLORS.speaking, label: 'Interrumpir y hablar' }
+        : { icon: 'stop', color: COLORS.speaking, label: 'Detener' };
+      default: return { icon: 'microphone', color: COLORS.primary, label: 'Hablar' };
+    }
+  })();
 
-  const stateInfo = STATE_LABELS[pipelineState] || STATE_LABELS.idle;
-  const statusMeta = `${settings.llmProvider}/${modelName.replace(/^Hermes \//, '')}`;
+  const batteryColor = bluetoothBattery != null && bluetoothBattery <= 20 ? COLORS.error : COLORS.success;
+  const glassesLabel = isBluetoothConnected
+    ? `${bluetoothDeviceName || 'Gafas'}${bluetoothBattery != null ? ` · ${bluetoothBattery}%` : ''}`
+    : isAutoConnecting ? 'Buscando…' : 'Conectar gafas';
+  const glassesColor = isBluetoothConnected ? batteryColor : isAutoConnecting ? COLORS.warning : COLORS.textSecondary;
+
+  /* ── Conversation rendering (inverted list: newest at the bottom) ── */
+  const renderEntry = useCallback(({ item }: { item: ConversationEntry }) => (
+    <View>
+      <Bubble role="user" label="TÚ" text={item.userMessage.content} time={item.userMessage.timestamp} />
+      <Bubble role="assistant" label={aiLabel} text={item.assistantMessage.content} time={item.assistantMessage.timestamp} />
+    </View>
+  ), [aiLabel]);
+
+  const inProgress = (
+    <View>
+      {(currentTranscription || interimTranscription) ? (
+        <Bubble role="user" label="TÚ" text={currentTranscription || interimTranscription} pending={!currentTranscription} />
+      ) : null}
+      {currentResponse ? (
+        <Bubble role="assistant" label={aiLabel} text={currentResponse} />
+      ) : pipelineState === 'processing' ? (
+        <View style={[styles.bubble, styles.bubbleAI]}>
+          <Text style={[styles.bubbleLabel, { color: COLORS.primary }]}>{aiLabel}</Text>
+          <TypingDots color={COLORS.primary} />
+        </View>
+      ) : null}
+    </View>
+  );
 
   return (
-    <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        {/* ── Top Info Bar: KAIRO + Battery ── */}
-        <View style={styles.topInfoBar}>
-          <View style={styles.personalityChip}>
-            <Icon name={personality.icon as any} size={16} color={COLORS.primary} />
-            <Text style={styles.personalityChipText}>{aiLabel}</Text>
-          </View>
-          {settings.continuousConversation && (
-            <View style={styles.followUpChip}>
-              <Icon name="autorenew" size={14} color={COLORS.success} />
-              <Text style={styles.followUpChipText}>Continuo</Text>
-            </View>
-          )}
-          <View style={styles.modelChip}>
-            <Icon name="brain" size={14} color={COLORS.processing} />
-            <Text style={styles.modelChipText} numberOfLines={1}>{modelName}</Text>
-          </View>
-          <View style={styles.voiceChip}>
-            <Icon name="waveform" size={14} color={COLORS.speaking} />
-            <Text style={styles.voiceChipText} numberOfLines={1}>{voiceName}</Text>
-          </View>
-          {settings.voiceMode === 'grok' ? (
-            <View style={[styles.followUpChip, { borderColor: `${COLORS.accent}60` }]}>
-              <Icon name="lightning-bolt" size={14} color={COLORS.accent} />
-              <Text style={[styles.followUpChipText, { color: COLORS.accent }]}>
-                {isGrokActive() ? 'GROK LIVE' : 'Grok'}
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        {/* ── Header ── */}
+        <View style={styles.header}>
+          <View style={styles.brand}>
+            <View style={[styles.brandDot, { backgroundColor: stateColor, shadowColor: stateColor }]} />
+            <View style={styles.flexShrink}>
+              <Text style={styles.brandTitle}>{aiLabel}</Text>
+              <Text style={[styles.brandState, { color: stateColor }]} numberOfLines={1}>
+                {stateCopy.title}
               </Text>
             </View>
-          ) : null}
-          <View style={[
-            styles.connectionChip,
-            isBluetoothConnected ? styles.connectionChipOk : styles.connectionChipSearching,
-          ]}>
-            <Icon
-              name={isBluetoothConnected ? 'bluetooth-connect' : isAutoConnecting ? 'radar' : 'bluetooth-off'}
-              size={14}
-              color={isBluetoothConnected ? COLORS.success : isAutoConnecting ? COLORS.warning : COLORS.textSecondary}
+          </View>
+          <View style={styles.headerActions}>
+            <Pill
+              label={glassesLabel}
+              icon={isBluetoothConnected ? 'glasses' : isAutoConnecting ? 'radar' : 'bluetooth'}
+              color={glassesColor}
+              onPress={handleOpenBLEScan}
             />
-            <Text style={[
-              styles.connectionChipText,
-              { color: isBluetoothConnected ? COLORS.success : isAutoConnecting ? COLORS.warning : COLORS.textSecondary },
-            ]}>
-              {isBluetoothConnected ? 'Gafas OK' : isAutoConnecting ? 'Buscando' : 'Auto BLE'}
-            </Text>
+            {hasConversation ? (
+              <IconButton icon="square-edit-outline" label="Nueva conversación" onPress={handleNewChat} color={COLORS.text} filled />
+            ) : null}
           </View>
-          {isBluetoothConnected && bluetoothBattery != null && (
-            <View style={styles.batteryChip}>
-              <Icon
-                name={bluetoothBattery >= 50 ? 'battery' : bluetoothBattery >= 20 ? 'battery-30' : 'battery-alert-variant-outline'}
-                size={16}
-                color={bluetoothBattery <= 20 ? COLORS.error : COLORS.success}
-              />
-              <Text style={[styles.batteryChipText, { color: bluetoothBattery <= 20 ? COLORS.error : COLORS.success }]}>
-                {bluetoothBattery}%
-              </Text>
-            </View>
-          )}
         </View>
 
-        {/* Top HUD bar */}
-        <TouchableOpacity
-          onPress={isBluetoothConnected ? () => disconnect() : handleOpenBLEScan}
-          activeOpacity={0.7}
-        >
-          <StatusBar
-            pipelineState={pipelineState}
-            isBluetoothConnected={isBluetoothConnected}
-            bluetoothDeviceName={bluetoothDeviceName}
-            batteryLevel={bluetoothBattery}
+        {/* ── Body ── */}
+        {hasConversation ? (
+          <FlatList
+            style={styles.flex}
+            data={entries}
+            keyExtractor={(item) => item.id}
+            renderItem={renderEntry}
+            inverted
+            ListHeaderComponent={inProgress}
+            contentContainerStyle={styles.conversationContent}
+            keyboardDismissMode="interactive"
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
           />
-        </TouchableOpacity>
-
-        {/* ── Live Transcription Bar ── */}
-        {pipelineState === 'listening' && (
-          <View style={styles.liveTranscriptionBar}>
-            <View style={styles.liveTranscriptionDot} />
-            <Text style={styles.liveTranscriptionLabel}>EN VIVO</Text>
-            <Text style={styles.liveTranscriptionText} numberOfLines={2}>
-              {interimTranscription || 'Escuchando...'}
-            </Text>
-          </View>
-        )}
-
-        {Platform.OS !== 'web' && pipelineState === 'speaking' && settings.interruptSpeechWithWakeWord && (
-          <View style={styles.interruptHintBar}>
-            <Icon name="microphone-plus" size={15} color={COLORS.primary} />
-            <Text style={styles.interruptHintText} numberOfLines={1}>
-              Di "{settings.wakeWord}" para cortar y hablar encima
-            </Text>
-          </View>
-        )}
-
-        <View style={cockpitStyles.liveStrip}>
-          <View style={cockpitStyles.stepRow}>
-            {STATE_ORDER.map((step, index) => (
-              <View
-                key={step}
-                style={[
-                  cockpitStyles.step,
-                  activeStepIndex >= index && { backgroundColor: stateColor },
-                  pipelineState === 'idle' && index === 0 && { backgroundColor: COLORS.primaryDark },
-                ]}
-              />
-            ))}
-          </View>
-          <View style={cockpitStyles.metaRow}>
-            <Text style={cockpitStyles.metaText} numberOfLines={1}>
-              {stateInfo.label} · {streamingMode}
-            </Text>
-            <Text style={[cockpitStyles.metaText, { textAlign: 'right', color: stateColor }]} numberOfLines={1}>
-              {statusMeta}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.mainArea}>
-          {hasConversation ? (
-            /* ── Conversation View ── */
-            <ScrollView
-              ref={scrollRef}
-              style={styles.conversationScroll}
-              contentContainerStyle={styles.conversationContent}
-              onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
-            >
-              {/* Previous session entries */}
-              {sessionEntries.map((entry: ConversationEntry) => (
-                <View key={entry.id}>
-                  <View style={styles.chatBubbleUser}>
-                    <Text style={styles.chatBubbleLabel}>TÚ</Text>
-                    <Text style={styles.chatBubbleText}>{entry.userMessage.content}</Text>
-                  </View>
-                  <View style={styles.chatBubbleAI}>
-                    <Text style={[styles.chatBubbleLabel, { color: COLORS.primary }]}>{aiLabel}</Text>
-                    <Text style={styles.chatBubbleText}>{entry.assistantMessage.content}</Text>
-                  </View>
-                </View>
-              ))}
-
-              {/* Error bubble */}
-              {error && (
-                <View style={styles.errorBubble}>
-                  <Icon name="alert-circle" size={16} color={COLORS.error} />
-                  <Text style={styles.errorText}>{error}</Text>
-                </View>
-              )}
-
-              {/* Current in-progress turn */}
-              {(currentTranscription || interimTranscription) && (
-                <View style={styles.chatBubbleUser}>
-                  <Text style={styles.chatBubbleLabel}>TÚ</Text>
-                  <Text style={[
-                    styles.chatBubbleText,
-                    !currentTranscription && { color: COLORS.textSecondary, fontStyle: 'italic' },
-                  ]}>
-                    {currentTranscription || interimTranscription}
-                  </Text>
-                </View>
-              )}
-
-              {currentResponse ? (
-                <View style={styles.chatBubbleAI}>
-                  <Text style={[styles.chatBubbleLabel, { color: COLORS.primary }]}>{aiLabel}</Text>
-                  <Text style={styles.chatBubbleText}>{currentResponse}</Text>
-                </View>
-              ) : null}
-
-              {pipelineState === 'processing' && !currentResponse && (
-                <View style={styles.chatBubbleAI}>
-                  <Text style={[styles.chatBubbleLabel, { color: COLORS.primary }]}>{aiLabel}</Text>
-                  <ActivityIndicator size="small" color={COLORS.primary} style={{ alignSelf: 'flex-start' }} />
-                </View>
-              )}
-            </ScrollView>
-          ) : (
-            /* ── Hero / Idle State ── */
-            <View style={styles.heroSection}>
-              <TouchableOpacity
-                onPress={handleReactorPress}
-                activeOpacity={0.7}
-              >
-                <ArcReactor state={pipelineState} />
-              </TouchableOpacity>
-
-              <Text style={[styles.stateLabel, { color: stateColor }]}>{stateInfo.label}</Text>
-              <Text style={styles.stateSubtitle}>
-                {Platform.OS === 'web' && pipelineState === 'idle'
-                  ? 'Pulsa el reactor o Hablar para activar el micro'
-                  : stateInfo.sub}
-              </Text>
-
-              <LatencyHUD />
-
-              <View style={cockpitStyles.grid}>
-                <CockpitCell
-                  icon="bluetooth-connect"
-                  label="GAFAS"
-                  value={isBluetoothConnected ? bluetoothDeviceName || 'Conectadas' : isAutoConnecting ? 'Buscando' : 'Sin enlace'}
-                  tone={isBluetoothConnected ? COLORS.success : isAutoConnecting ? COLORS.warning : COLORS.textSecondary}
-                />
-                <CockpitCell
-                  icon="brain"
-                  label="MODELO"
-                  value={modelName}
-                  tone={COLORS.processing}
-                />
-                <CockpitCell
-                  icon="waveform"
-                  label="VOZ"
-                  value={voiceName}
-                  tone={COLORS.speaking}
-                />
-                <CockpitCell
-                  icon="speedometer"
-                  label="MODO"
-                  value={streamingMode}
-                  tone={COLORS.primary}
-                />
-              </View>
-
-              {/* Quick actions */}
-              <View style={styles.quickActions}>
-                <TouchableOpacity
-                  style={[styles.quickBtn, isBluetoothConnected && styles.quickBtnActive]}
-                  onPress={isBluetoothConnected ? () => disconnect() : handleOpenBLEScan}
-                  activeOpacity={0.7}
-                >
-                  <Icon
-                    name={isBluetoothConnected ? 'bluetooth-connect' : isAutoConnecting ? 'radar' : 'bluetooth'}
-                    size={22}
-                    color={isBluetoothConnected ? COLORS.success : isAutoConnecting ? COLORS.warning : COLORS.textSecondary}
-                  />
-                  <Text style={[
-                    styles.quickBtnLabel,
-                    isBluetoothConnected && { color: COLORS.success },
-                    isAutoConnecting && { color: COLORS.warning },
-                  ]}>
-                    {isBluetoothConnected ? 'BLE OK' : isAutoConnecting ? 'Buscando' : 'Conectar'}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.quickBtn, styles.quickBtnPrimary]}
-                  onPress={handleReactorPress}
-                  disabled={pipelineState !== 'idle'}
-                  activeOpacity={0.7}
-                >
-                  <Icon name="microphone" size={22} color={COLORS.primary} />
-                  <Text style={[styles.quickBtnLabel, { color: COLORS.primary }]}>Hablar</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-        </View>
-
-        {/* Floating controls when in conversation */}
-        {hasConversation && (
-          <View style={styles.floatingControls}>
-            {canForceStop && (
-              <TouchableOpacity
-                style={[
-                  styles.forceStopBtn,
-                  canInterrupt && { borderColor: COLORS.primary, backgroundColor: `${COLORS.primary}12` },
-                ]}
-                onPress={canInterrupt ? handleReactorPress : handleForceStop}
-              >
-                <Icon name={canInterrupt ? 'microphone-plus' : 'stop-circle'} size={20} color={canInterrupt ? COLORS.primary : COLORS.error} />
-                <Text style={[styles.forceStopLabel, canInterrupt && { color: COLORS.primary }]}>
-                  {canInterrupt ? 'Interrumpir' : 'Parar'}
-                </Text>
-              </TouchableOpacity>
-            )}
-            {!canForceStop && (
-              <TouchableOpacity
-                style={[styles.floatingMicBtn, { borderColor: stateColor }]}
-                onPress={handleReactorPress}
-                disabled={pipelineState !== 'idle'}
-                activeOpacity={0.7}
-              >
-                <Icon name="microphone" size={20} color={stateColor} />
-                <Text style={[styles.floatingMicLabel, { color: stateColor }]}>Hablar</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        )}
-
-        {/* Text input bar */}
-        <View style={styles.inputBar}>
-          <TextInput
-            style={styles.textInput}
-            value={textInput}
-            onChangeText={setTextInput}
-            placeholder="Escribe un mensaje..."
-            placeholderTextColor={COLORS.textMuted}
-            editable={pipelineState === 'idle'}
-            returnKeyType="send"
-            onSubmitEditing={handleSendText}
-          />
-          <TouchableOpacity
-            style={[styles.sendBtn, !textInput.trim() && { opacity: 0.4 }]}
-            onPress={handleSendText}
-            disabled={!textInput.trim() || pipelineState !== 'idle'}
+        ) : (
+          <ScrollView
+            style={styles.flex}
+            contentContainerStyle={styles.hero}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
           >
-            <Icon name="send" size={20} color={textInput.trim() ? COLORS.primary : COLORS.textMuted} />
-          </TouchableOpacity>
+            <Pressable
+              onPress={handleMicPress}
+              accessibilityRole="button"
+              accessibilityLabel={micConfig.label}
+              style={({ pressed }) => pressed && { opacity: 0.8 }}
+            >
+              <ArcReactor state={pipelineState} />
+            </Pressable>
+            <Text style={[styles.heroTitle, { color: stateColor }]}>{stateCopy.title}</Text>
+            <Text style={styles.heroSubtitle}>{stateCopy.sub}</Text>
+
+            <View style={styles.infoRow}>
+              <View style={styles.infoCell}>
+                <Icon name="brain" size={16} color={COLORS.processing} />
+                <Text style={styles.infoLabel}>MODELO</Text>
+                <Text style={styles.infoValue} numberOfLines={2}>{isGrokMode ? 'Grok Realtime' : modelName}</Text>
+              </View>
+              <View style={styles.infoCell}>
+                <Icon name="waveform" size={16} color={COLORS.speaking} />
+                <Text style={styles.infoLabel}>VOZ</Text>
+                <Text style={styles.infoValue} numberOfLines={2}>{voiceName}</Text>
+              </View>
+              <View style={styles.infoCell}>
+                <Icon name="timer-outline" size={16} color={COLORS.primary} />
+                <Text style={styles.infoLabel}>ÚLTIMA</Text>
+                <Text style={styles.infoValue} numberOfLines={1}>{formatSeconds(latencyMetrics?.totalMs)}</Text>
+              </View>
+            </View>
+
+            {!isGrokMode ? (
+              <View style={styles.suggestions}>
+                <Text style={styles.suggestionsTitle}>Prueba a preguntar</Text>
+                {SUGGESTIONS.map((suggestion) => (
+                  <Pressable
+                    key={suggestion}
+                    onPress={() => handleSendText(suggestion)}
+                    disabled={!isIdle}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [styles.suggestion, pressed && { opacity: 0.7 }, !isIdle && { opacity: 0.4 }]}
+                  >
+                    <Icon name="lightning-bolt-outline" size={15} color={COLORS.primary} />
+                    <Text style={styles.suggestionText} numberOfLines={1}>{suggestion}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+          </ScrollView>
+        )}
+
+        {/* ── Status strip (live transcript / errors) ── */}
+        {error ? (
+          <View style={styles.errorBar}>
+            <Icon name="alert-circle" size={18} color={COLORS.error} />
+            <Text style={styles.errorText} numberOfLines={3}>{error}</Text>
+            <IconButton icon="close" label="Cerrar aviso" onPress={clearError} color={COLORS.error} size={18} />
+          </View>
+        ) : pipelineState === 'listening' && hasConversation ? (
+          <View style={styles.liveBar}>
+            <View style={styles.liveDot} />
+            <Text style={styles.liveText} numberOfLines={2}>{interimTranscription || 'Escuchando…'}</Text>
+          </View>
+        ) : null}
+
+        {/* ── Composer ── */}
+        <View style={[styles.composer, { paddingBottom: Math.max(SPACING.sm, insets.bottom > 0 ? 6 : SPACING.sm) }]}>
+          <View style={[styles.inputWrap, !isIdle && styles.inputWrapDisabled]}>
+            <TextInput
+              style={styles.textInput}
+              value={textInput}
+              onChangeText={setTextInput}
+              placeholder={isIdle ? `Escribe a ${aiLabel}…` : stateCopy.title + '…'}
+              placeholderTextColor={COLORS.textMuted}
+              editable={isIdle && !grokLive}
+              returnKeyType="send"
+              onSubmitEditing={() => handleSendText()}
+              submitBehavior="submit"
+              multiline
+              maxLength={2000}
+              accessibilityLabel="Mensaje de texto"
+            />
+            {textInput.trim() ? (
+              <IconButton
+                icon="arrow-up"
+                label="Enviar mensaje"
+                onPress={() => handleSendText()}
+                disabled={!isIdle}
+                color={COLORS.onPrimary}
+                style={styles.sendBtn}
+              />
+            ) : null}
+          </View>
+
+          {!isIdle && !isGrokMode ? (
+            <IconButton
+              icon="close"
+              label={pipelineState === 'listening' ? 'Cancelar' : 'Parar'}
+              onPress={handleStop}
+              color={COLORS.textSecondary}
+              filled
+              style={styles.stopBtn}
+            />
+          ) : null}
+
+          <Pressable
+            onPress={handleMicPress}
+            accessibilityRole="button"
+            accessibilityLabel={micConfig.label}
+            style={({ pressed }) => [
+              styles.micBtn,
+              { borderColor: micConfig.color, backgroundColor: withAlpha(micConfig.color, isIdle && !grokLive ? 0.14 : 0.24) },
+              pressed && { transform: [{ scale: 0.94 }] },
+            ]}
+          >
+            {pipelineState === 'processing' && !isGrokMode ? (
+              <>
+                <ActivityIndicator color={micConfig.color} style={StyleSheet.absoluteFill} />
+                <Icon name="stop" size={14} color={micConfig.color} />
+              </>
+            ) : (
+              <Icon name={micConfig.icon} size={26} color={micConfig.color} />
+            )}
+          </Pressable>
         </View>
       </KeyboardAvoidingView>
 
-      {/* BLE Scan Modal */}
-      <Modal visible={showBLEModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Dispositivos BLE</Text>
-              <TouchableOpacity onPress={() => setShowBLEModal(false)}>
-                <Icon name="close" size={24} color={COLORS.text} />
-              </TouchableOpacity>
+      {/* ── Glasses sheet ── */}
+      <Modal visible={showBLEModal} transparent animationType="slide" onRequestClose={() => setShowBLEModal(false)}>
+        <Pressable style={styles.modalOverlay} onPress={() => setShowBLEModal(false)}>
+          <Pressable style={[styles.sheet, { paddingBottom: SPACING.lg + insets.bottom }]} onPress={() => {}}>
+            <View style={styles.sheetHandle} />
+            <View style={styles.sheetHeader}>
+              <Text style={styles.sheetTitle}>Gafas</Text>
+              <IconButton icon="close" label="Cerrar" onPress={() => setShowBLEModal(false)} color={COLORS.text} />
             </View>
 
-            {!bleAvailable && (
-              <View style={styles.bleWarning}>
-                <Icon name="alert" size={20} color={COLORS.warning} />
-                <Text style={styles.bleWarningText}>
-                  Bluetooth no disponible. Verifica que está activado en Ajustes.
-                </Text>
+            {isBluetoothConnected ? (
+              <View style={styles.connectedCard}>
+                <View style={styles.connectedIcon}>
+                  <Icon name="glasses" size={28} color={COLORS.success} />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.connectedName}>{bluetoothDeviceName || 'Gafas conectadas'}</Text>
+                  <Text style={styles.connectedMeta}>
+                    Conectadas{bluetoothBattery != null ? ` · batería ${bluetoothBattery}%` : ''}
+                  </Text>
+                </View>
+                <Button label="Desconectar" variant="danger" compact onPress={handleDisconnect} />
               </View>
-            )}
-
-            {isScanning && (
-              <View style={styles.scanningRow}>
-                <ActivityIndicator color={COLORS.primary} />
-                <Text style={styles.scanningText}>Buscando...</Text>
-              </View>
-            )}
-
-            {!isScanning && foundDevices.length === 0 && bleAvailable && (
-              <Text style={styles.noDevicesText}>No se encontraron dispositivos</Text>
-            )}
-
-            <FlatList
-              data={foundDevices}
-              keyExtractor={(item) => item.id}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={styles.deviceRow}
-                  onPress={() => handleConnectDevice(item.id)}
-                  disabled={connecting !== null}
-                >
-                  <Icon name="bluetooth" size={20} color={COLORS.primary} />
-                  <View style={styles.deviceInfo}>
-                    <Text style={styles.deviceNameText}>{item.name || 'Unknown'}</Text>
-                    <Text style={styles.deviceIdText}>{item.id}</Text>
+            ) : (
+              <>
+                {!bleAvailable ? (
+                  <View style={styles.bleWarning}>
+                    <Icon name="bluetooth-off" size={20} color={COLORS.warning} />
+                    <Text style={styles.bleWarningText}>
+                      Bluetooth no disponible. Actívalo en el Centro de control o en Ajustes del iPhone.
+                    </Text>
                   </View>
-                  {connecting === item.id ? (
-                    <ActivityIndicator size="small" color={COLORS.primary} />
-                  ) : (
-                    <Icon name="link-variant" size={20} color={COLORS.textSecondary} />
-                  )}
-                </TouchableOpacity>
-              )}
-            />
+                ) : null}
 
-            {bleAvailable && !isScanning && (
-              <TouchableOpacity style={styles.rescanBtn} onPress={handleOpenBLEScan}>
-                <Icon name="refresh" size={18} color={COLORS.primary} />
-                <Text style={styles.rescanText}>Volver a buscar</Text>
-              </TouchableOpacity>
+                {isScanning ? (
+                  <View style={styles.scanningRow}>
+                    <ActivityIndicator color={COLORS.primary} />
+                    <Text style={styles.scanningText}>Buscando gafas cercanas…</Text>
+                  </View>
+                ) : null}
+
+                {!isScanning && foundDevices.length === 0 && bleAvailable ? (
+                  <Text style={styles.noDevicesText}>
+                    No se encontraron gafas. Asegúrate de que están encendidas y cerca.
+                  </Text>
+                ) : null}
+
+                {foundDevices.map((item) => (
+                  <Pressable
+                    key={item.id}
+                    style={({ pressed }) => [styles.deviceRow, pressed && { opacity: 0.7 }]}
+                    onPress={() => handleConnectDevice(item.id)}
+                    disabled={connecting !== null}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Conectar ${item.name || 'dispositivo'}`}
+                  >
+                    <View style={styles.deviceIcon}>
+                      <Icon name="glasses" size={20} color={COLORS.primary} />
+                    </View>
+                    <View style={styles.flex}>
+                      <Text style={styles.deviceNameText}>{item.name || 'Dispositivo'}</Text>
+                      <Text style={styles.deviceIdText} numberOfLines={1}>{item.id}</Text>
+                    </View>
+                    {connecting === item.id ? (
+                      <ActivityIndicator size="small" color={COLORS.primary} />
+                    ) : (
+                      <Text style={styles.deviceConnect}>Conectar</Text>
+                    )}
+                  </Pressable>
+                ))}
+
+                {bleAvailable && !isScanning ? (
+                  <Button label="Volver a buscar" icon="refresh" variant="ghost" onPress={handleOpenBLEScan} style={styles.rescanBtn} />
+                ) : null}
+              </>
             )}
-          </View>
-        </View>
+          </Pressable>
+        </Pressable>
       </Modal>
     </SafeAreaView>
   );
@@ -811,216 +700,362 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
-  mainArea: {
-    flex: 1,
+  flex: { flex: 1 },
+  flexShrink: { flexShrink: 1 },
+  /* Header */
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.sm,
+    paddingBottom: 10,
   },
-  /* Hero / idle */
-  heroSection: {
-    flex: 1,
+  brand: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flexShrink: 1,
+  },
+  brandDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    shadowOpacity: 0.9,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  brandTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: COLORS.text,
+    letterSpacing: 2,
+  },
+  brandState: {
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: -1,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 1,
+  },
+  /* Hero */
+  hero: {
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 32,
-    gap: 8,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.lg,
   },
-  stateLabel: {
-    fontSize: 18,
-    fontWeight: '700',
-    letterSpacing: 1,
-    marginTop: 12,
+  heroTitle: {
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    marginTop: SPACING.lg,
   },
-  stateSubtitle: {
-    fontSize: 12,
+  heroSubtitle: {
+    fontSize: 14,
     color: COLORS.textSecondary,
     textAlign: 'center',
-    lineHeight: 18,
+    lineHeight: 20,
+    marginTop: 6,
+    maxWidth: 320,
   },
-  quickActions: {
+  infoRow: {
     flexDirection: 'row',
-    gap: 12,
-    marginTop: 20,
+    gap: 8,
+    marginTop: SPACING.lg,
+    alignSelf: 'stretch',
   },
-  quickBtn: {
+  infoCell: {
+    flex: 1,
+    backgroundColor: COLORS.card,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 10,
+    gap: 3,
+  },
+  infoLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: COLORS.textMuted,
+    letterSpacing: 1,
+    marginTop: 4,
+  },
+  infoValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  suggestions: {
+    alignSelf: 'stretch',
+    marginTop: SPACING.lg,
+    gap: 8,
+  },
+  suggestionsTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: COLORS.textMuted,
+    letterSpacing: 1.1,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  suggestion: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: COLORS.surface,
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.card,
     borderWidth: 1,
     borderColor: COLORS.border,
   },
-  quickBtnActive: {
-    borderColor: COLORS.success,
-    backgroundColor: `${COLORS.success}10`,
-  },
-  quickBtnPrimary: {
-    borderColor: COLORS.primary,
-    backgroundColor: `${COLORS.primary}10`,
-  },
-  quickBtnLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.textSecondary,
+  suggestionText: {
+    flex: 1,
+    fontSize: 14,
+    color: COLORS.text,
   },
   /* Conversation */
-  conversationScroll: {
-    flex: 1,
-  },
   conversationContent: {
-    padding: 16,
-    paddingBottom: 8,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
     flexGrow: 1,
-    justifyContent: 'flex-end',
   },
-  chatBubbleUser: {
+  bubble: {
+    maxWidth: '86%',
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginVertical: 5,
+    borderWidth: 1,
+  },
+  bubbleUser: {
     alignSelf: 'flex-end',
-    maxWidth: '85%',
-    backgroundColor: `${COLORS.primary}15`,
-    borderRadius: 14,
-    borderTopRightRadius: 4,
-    padding: 12,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: `${COLORS.primary}30`,
+    backgroundColor: withAlpha(COLORS.primary, 0.13),
+    borderColor: withAlpha(COLORS.primary, 0.3),
+    borderBottomRightRadius: 6,
   },
-  chatBubbleAI: {
+  bubbleAI: {
     alignSelf: 'flex-start',
-    maxWidth: '85%',
     backgroundColor: COLORS.surface,
-    borderRadius: 14,
-    borderTopLeftRadius: 4,
-    padding: 12,
-    marginBottom: 10,
-    borderWidth: 1,
     borderColor: COLORS.border,
+    borderBottomLeftRadius: 6,
   },
-  chatBubbleLabel: {
+  bubbleMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 3,
+  },
+  bubbleLabel: {
     fontSize: 10,
-    fontWeight: '800',
-    color: COLORS.textSecondary,
-    letterSpacing: 0.5,
-    marginBottom: 4,
+    fontWeight: '900',
+    letterSpacing: 0.8,
   },
-  chatBubbleText: {
+  bubbleTime: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+  },
+  bubbleText: {
     fontSize: 15,
     color: COLORS.text,
     lineHeight: 22,
   },
-  errorBubble: {
+  bubbleTextPending: {
+    color: COLORS.textSecondary,
+    fontStyle: 'italic',
+  },
+  typingRow: {
+    flexDirection: 'row',
+    gap: 5,
+    paddingVertical: 6,
+  },
+  typingDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  /* Status strip */
+  errorBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    backgroundColor: `${COLORS.error}12`,
-    padding: 10,
-    borderRadius: 10,
-    borderLeftWidth: 3,
-    borderLeftColor: COLORS.error,
-    marginBottom: 10,
+    gap: 10,
+    marginHorizontal: SPACING.md,
+    marginBottom: 6,
+    paddingLeft: 12,
+    paddingVertical: 4,
+    borderRadius: RADIUS.md,
+    backgroundColor: withAlpha(COLORS.error, 0.1),
+    borderWidth: 1,
+    borderColor: withAlpha(COLORS.error, 0.35),
   },
   errorText: {
     flex: 1,
     color: COLORS.error,
     fontSize: 13,
-  },
-  /* Floating controls */
-  floatingControls: {
-    alignItems: 'center',
+    lineHeight: 18,
     paddingVertical: 6,
   },
-  forceStopBtn: {
+  liveBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 18,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: `${COLORS.error}15`,
+    gap: 10,
+    marginHorizontal: SPACING.md,
+    marginBottom: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: RADIUS.md,
+    backgroundColor: withAlpha(COLORS.listening, 0.08),
     borderWidth: 1,
-    borderColor: COLORS.error,
+    borderColor: withAlpha(COLORS.listening, 0.3),
   },
-  forceStopLabel: {
+  liveDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.listening,
+  },
+  liveText: {
+    flex: 1,
     fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.error,
+    color: COLORS.text,
+    fontStyle: 'italic',
   },
-  floatingMicBtn: {
+  /* Composer */
+  composer: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-end',
     gap: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    backgroundColor: `${COLORS.primary}10`,
+    paddingHorizontal: SPACING.md,
+    paddingTop: 6,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+    backgroundColor: COLORS.background,
   },
-  floatingMicLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  /* Input bar */
-  inputBar: {
+  inputWrap: {
+    flex: 1,
     flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    gap: 8,
+    alignItems: 'flex-end',
+    minHeight: 52,
+    backgroundColor: COLORS.surface,
+    borderRadius: 26,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingLeft: 16,
+    paddingRight: 6,
+    paddingVertical: 6,
+  },
+  inputWrapDisabled: {
+    opacity: 0.6,
   },
   textInput: {
     flex: 1,
-    backgroundColor: COLORS.surface,
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
     color: COLORS.text,
-    fontSize: 14,
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    fontSize: 15,
+    maxHeight: 120,
+    paddingTop: Platform.OS === 'ios' ? 10 : 6,
+    paddingBottom: Platform.OS === 'ios' ? 10 : 6,
   },
   sendBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: COLORS.surface,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: COLORS.primary,
+  },
+  stopBtn: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+  },
+  micBtn: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  /* BLE Modal */
+  /* Glasses sheet */
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
+    backgroundColor: COLORS.overlay,
     justifyContent: 'flex-end',
   },
-  modalContent: {
+  sheet: {
     backgroundColor: COLORS.card,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    maxHeight: '60%',
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
+    paddingHorizontal: SPACING.md,
+    paddingTop: 8,
+    maxHeight: '75%',
+    borderTopWidth: 1,
+    borderColor: COLORS.border,
   },
-  modalHeader: {
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: COLORS.borderLight,
+    marginBottom: 8,
+  },
+  sheetHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: SPACING.sm,
   },
-  modalTitle: {
-    fontSize: 18,
+  sheetTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: COLORS.text,
+  },
+  connectedCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 14,
+    borderRadius: RADIUS.lg,
+    backgroundColor: withAlpha(COLORS.success, 0.07),
+    borderWidth: 1,
+    borderColor: withAlpha(COLORS.success, 0.3),
+  },
+  connectedIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: withAlpha(COLORS.success, 0.12),
+  },
+  connectedName: {
+    fontSize: 16,
     fontWeight: '700',
     color: COLORS.text,
+  },
+  connectedMeta: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 2,
   },
   bleWarning: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: 8,
-    backgroundColor: `${COLORS.warning}15`,
+    gap: 10,
+    backgroundColor: withAlpha(COLORS.warning, 0.1),
     padding: 12,
-    borderRadius: 10,
+    borderRadius: RADIUS.md,
     marginBottom: 12,
   },
   bleWarningText: {
     flex: 1,
-    fontSize: 12,
+    fontSize: 13,
     color: COLORS.warning,
     lineHeight: 18,
   },
@@ -1028,7 +1063,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    paddingVertical: 12,
+    paddingVertical: 14,
   },
   scanningText: {
     fontSize: 14,
@@ -1039,215 +1074,40 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     textAlign: 'center',
     paddingVertical: 20,
+    lineHeight: 20,
   },
   deviceRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     paddingVertical: 12,
-    borderBottomWidth: 1,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
-  deviceInfo: {
-    flex: 1,
+  deviceIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: withAlpha(COLORS.primary, 0.1),
   },
   deviceNameText: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '600',
     color: COLORS.text,
   },
   deviceIdText: {
     fontSize: 11,
-    color: COLORS.textSecondary,
+    color: COLORS.textMuted,
     marginTop: 2,
   },
-  rescanBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    marginTop: 8,
-  },
-  rescanText: {
-    fontSize: 14,
-    color: COLORS.primary,
-    fontWeight: '600',
-  },
-  /* Top info bar */
-  topInfoBar: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    gap: 8,
-  },
-  personalityChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: `${COLORS.primary}15`,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: `${COLORS.primary}30`,
-  },
-  personalityChipText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: COLORS.primary,
-    letterSpacing: 0.5,
-  },
-  wakeWordChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: `${COLORS.accent}12`,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: `${COLORS.accent}25`,
-  },
-  wakeWordChipText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: COLORS.accent,
-  },
-  followUpChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: `${COLORS.success}12`,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: `${COLORS.success}25`,
-  },
-  followUpChipText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.success,
-  },
-  modelChip: {
-    maxWidth: 170,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: `${COLORS.processing}12`,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: `${COLORS.processing}25`,
-  },
-  modelChipText: {
-    flexShrink: 1,
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.processing,
-  },
-  voiceChip: {
-    maxWidth: 150,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: `${COLORS.speaking}12`,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: `${COLORS.speaking}25`,
-  },
-  voiceChipText: {
-    flexShrink: 1,
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.speaking,
-  },
-  connectionChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-  },
-  connectionChipOk: {
-    backgroundColor: `${COLORS.success}12`,
-    borderColor: `${COLORS.success}25`,
-  },
-  connectionChipSearching: {
-    backgroundColor: `${COLORS.warning}10`,
-    borderColor: `${COLORS.warning}22`,
-  },
-  connectionChipText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  batteryChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    marginLeft: 'auto',
-  },
-  batteryChipText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  /* Live transcription bar */
-  liveTranscriptionBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginHorizontal: 16,
-    marginBottom: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: `${COLORS.listening}10`,
-    borderWidth: 1,
-    borderColor: `${COLORS.listening}30`,
-  },
-  liveTranscriptionDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: COLORS.listening,
-  },
-  liveTranscriptionLabel: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: COLORS.listening,
-    letterSpacing: 0.5,
-  },
-  liveTranscriptionText: {
-    flex: 1,
+  deviceConnect: {
     fontSize: 13,
-    color: COLORS.text,
-    fontStyle: 'italic',
-  },
-  interruptHintBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginHorizontal: 16,
-    marginBottom: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: `${COLORS.primary}10`,
-    borderWidth: 1,
-    borderColor: `${COLORS.primary}30`,
-  },
-  interruptHintText: {
-    flex: 1,
-    fontSize: 12,
-    color: COLORS.primary,
     fontWeight: '700',
+    color: COLORS.primary,
+  },
+  rescanBtn: {
+    marginTop: SPACING.sm,
   },
 });

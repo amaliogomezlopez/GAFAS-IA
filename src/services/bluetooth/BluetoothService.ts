@@ -83,7 +83,13 @@ class BluetoothServiceClass {
   private _connectedDevice: Device | null = null;
   private _isScanning: boolean = false;
   private _bleAvailable: boolean = false;
+  /** Reconnect after an unexpected drop (false after a manual disconnect). */
   private _autoReconnect: boolean = true;
+  /** User preference from Settings → Bluetooth. */
+  private _autoReconnectEnabled: boolean = true;
+  private _connectInFlight: Promise<boolean> | null = null;
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _disconnectSub: Subscription | null = null;
   private _scanTimeout: ReturnType<typeof setTimeout> | null = null;
   private _notifSubs: Subscription[] = [];
   private _lastButtonAt: number = 0;
@@ -210,6 +216,23 @@ class BluetoothServiceClass {
 
   async connectToDevice(deviceId: string): Promise<boolean> {
     if (!this.manager || !this._bleAvailable) return false;
+    if (this._isConnected && this._connectedDevice?.id === deviceId) return true;
+    // Auto-connect, the reconnect timer and the UI can all ask at once;
+    // share a single attempt instead of racing two connections.
+    if (this._connectInFlight) return this._connectInFlight;
+
+    this._connectInFlight = this._connect(deviceId).finally(() => {
+      this._connectInFlight = null;
+    });
+    return this._connectInFlight;
+  }
+
+  private async _connect(deviceId: string): Promise<boolean> {
+    if (!this.manager) return false;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
 
     try {
       this.stopScan();
@@ -231,16 +254,23 @@ class BluetoothServiceClass {
       try { await AsyncStorage.setItem(SAVED_DEVICE_KEY, deviceId); } catch {}
 
       // Monitor disconnection
-      device.onDisconnected((error, disconnectedDevice) => {
+      this._disconnectSub?.remove();
+      this._disconnectSub = device.onDisconnected((error, disconnectedDevice) => {
         LogService.warn('BLE', `Disconnected from ${disconnectedDevice?.name}: ${error?.message || 'user'}`);
+        this._disconnectSub?.remove();
+        this._disconnectSub = null;
         this._isConnected = false;
         this._connectedDevice = null;
         this._battery = null;
         this._cancelNotifSubs();
         this.notifyStatusChange();
 
-        if (this._autoReconnect) {
-          setTimeout(() => this.connectToDevice(deviceId), RECONNECT_DELAY_MS);
+        if (this._autoReconnect && this._autoReconnectEnabled) {
+          if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+          this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            this.connectToDevice(deviceId).catch(() => {});
+          }, RECONNECT_DELAY_MS);
         }
       });
 
@@ -295,8 +325,14 @@ class BluetoothServiceClass {
                   const raw = atob(characteristic.value);
                   const bytes = Array.from(raw).map((c) => c.charCodeAt(0));
                   LogService.info('BLE', `Notification ${ch.uuid}: [${bytes.join(', ')}]`);
-                  // Treat any notification from a non-battery char as button press
-                  if (ch.uuid.toLowerCase() !== BATTERY_LEVEL_CHAR_UUID) {
+                  if (ch.uuid.toLowerCase() === BATTERY_LEVEL_CHAR_UUID) {
+                    // Keep the battery indicator live instead of the value read at connect time.
+                    if (bytes.length > 0 && bytes[0] <= 100 && bytes[0] !== this._battery) {
+                      this._battery = bytes[0];
+                      this.notifyStatusChange();
+                    }
+                  } else {
+                    // Treat any notification from a non-battery char as button press
                     const event = this.createButtonEvent(ch, characteristic, bytes);
                     LogService.info('BLE', `Button event ${event.signature}`);
                     this.notifyButtonPress(event);
@@ -322,6 +358,10 @@ class BluetoothServiceClass {
 
   async disconnect(): Promise<void> {
     this._autoReconnect = false;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     if (this._connectedDevice) {
       try {
         await this._connectedDevice.cancelConnection();
@@ -409,7 +449,8 @@ class BluetoothServiceClass {
       );
       if (char.value) {
         const raw = atob(char.value);
-        this._battery = raw.charCodeAt(0);
+        const level = raw.charCodeAt(0);
+        this._battery = level <= 100 ? level : null;
         console.log(`[BLE] Battery level: ${this._battery}%`);
       }
     } catch {
@@ -521,7 +562,11 @@ class BluetoothServiceClass {
   }
 
   setAutoReconnect(enabled: boolean): void {
-    this._autoReconnect = enabled;
+    this._autoReconnectEnabled = enabled;
+    if (!enabled && this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
   }
 
   private notifyStatusChange(): void {
@@ -549,6 +594,12 @@ class BluetoothServiceClass {
 
   cleanup(): void {
     this._autoReconnect = false;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this._disconnectSub?.remove();
+    this._disconnectSub = null;
     this.stopScan();
     this._cancelNotifSubs();
     this.subscribers = [];
