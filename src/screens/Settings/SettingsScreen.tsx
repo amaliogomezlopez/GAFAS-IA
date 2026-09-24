@@ -1,17 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  ScrollView,
-  StyleSheet,
   Alert,
   FlatList,
-  Share,
-  Modal,
   KeyboardAvoidingView,
+  LayoutAnimation,
+  Modal,
   Platform,
+  Pressable,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialCommunityIcons as Icon } from '@expo/vector-icons';
@@ -19,117 +20,221 @@ import {
   COLORS,
   GROK_VOICES,
   LLM_MODELS,
+  MONO_FONT,
   PERSONALITY_PRESETS,
+  RADIUS,
   RESPONSE_STYLE_PRESETS,
+  SPACING,
   TTS_VOICES,
-  WAKE_WORD_PRESETS,
+  withAlpha,
 } from '../../constants';
 import { useAppStore } from '../../stores';
 import { SecureStorage } from '../../services/secure-storage';
 import { LogService, type LogEntry, type LogLevel } from '../../services/LogService';
 import { LLMService } from '../../services/ai';
 import { TTSService } from '../../services/ai/TTSService';
-import type { APIKeys, LLMProvider, TTSProvider, TTSVoice } from '../../types';
+import {
+  Button,
+  Card,
+  Divider,
+  Hint,
+  IconButton,
+  OptionGroup,
+  Pill,
+  ScreenHeader,
+  SectionLabel,
+  ToggleRow,
+  type Option,
+} from '../../components';
+import { formatSeconds } from '../../utils/format';
+import type { APIKeys, LLMProvider, ResponseStyle, TTSProvider, TTSVoice } from '../../types';
 
-const LLM_PROVIDERS: LLMProvider[] = ['hermes', 'opencode', 'nvidia', 'minimax', 'openai', 'anthropic', 'google'];
-const TTS_PROVIDERS: TTSProvider[] = ['native', 'server', 'kokoro', 'openai', 'elevenlabs', 'minimax'];
-const BOOLEAN_OPTIONS = [true, false];
+type IconName = React.ComponentProps<typeof Icon>['name'];
+
+const LLM_PROVIDER_LABELS: Record<LLMProvider, string> = {
+  hermes: 'Hermes',
+  opencode: 'OpenCode',
+  nvidia: 'NVIDIA',
+  minimax: 'MiniMax',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  google: 'Google',
+};
+const LLM_PROVIDERS = Object.keys(LLM_PROVIDER_LABELS) as LLMProvider[];
+
+const TTS_PROVIDER_LABELS: Record<TTSProvider, string> = {
+  native: 'Voces del iPhone',
+  server: 'Neural (servidor)',
+  kokoro: 'Kokoro ⚡ baja latencia',
+  openai: 'OpenAI',
+  elevenlabs: 'ElevenLabs',
+  minimax: 'MiniMax',
+};
+const TTS_PROVIDERS = Object.keys(TTS_PROVIDER_LABELS) as TTSProvider[];
+
 const LISTENING_PRESETS = [
-  { label: 'Agresivo', silence: 850, final: 220, stop: 1100 },
-  { label: 'Rapido', silence: 1100, final: 300, stop: 1400 },
-  { label: 'Natural', silence: 1500, final: 450, stop: 1800 },
-];
+  { value: 'aggressive', label: 'Agresivo', silence: 850, final: 220, stop: 1100 },
+  { value: 'fast', label: 'Rápido', silence: 1100, final: 300, stop: 1400 },
+  { value: 'natural', label: 'Natural', silence: 1500, final: 450, stop: 1800 },
+] as const;
 const WAKE_REARM_PRESETS = [
-  { label: 'Instantaneo', resume: 70, cooldown: 500, trigger: 1000 },
-  { label: 'Seguro', resume: 120, cooldown: 750, trigger: 1500 },
-  { label: 'Anti-eco', resume: 250, cooldown: 1200, trigger: 2200 },
+  { value: 'instant', label: 'Instantáneo', resume: 70, cooldown: 500, trigger: 1000 },
+  { value: 'safe', label: 'Seguro', resume: 120, cooldown: 750, trigger: 1500 },
+  { value: 'anti-echo', label: 'Anti-eco', resume: 250, cooldown: 1200, trigger: 2200 },
+] as const;
+const LLM_TIMEOUT_OPTIONS: Option<number>[] = [22000, 45000, 90000, 120000].map((ms) => ({ value: ms, label: `${ms / 1000}s` }));
+const TTS_RATE_OPTIONS: Option<number>[] = [
+  { value: 0.96, label: 'Suave' },
+  { value: 1.08, label: 'Ágil' },
+  { value: 1.18, label: 'Rápida' },
 ];
-const LLM_TIMEOUTS = [22000, 45000, 90000, 120000];
-const TTS_RATES = [0.96, 1.08, 1.18];
-const TTS_PITCHES = [0.92, 1.0, 1.08];
-const BLUETOOTH_SCAN_DURATIONS = [2500, 3500, 6000];
-const BLUETOOTH_RECONNECT_INTERVALS = [5000, 7000, 12000];
+const TTS_PITCH_OPTIONS: Option<number>[] = [
+  { value: 0.92, label: 'Grave' },
+  { value: 1.0, label: 'Neutro' },
+  { value: 1.08, label: 'Brillante' },
+];
+const BLE_SCAN_OPTIONS: Option<number>[] = [2500, 3500, 6000].map((ms) => ({ value: ms, label: `${(ms / 1000).toFixed(1)}s` }));
+const BLE_WATCH_OPTIONS: Option<number>[] = [5000, 7000, 12000].map((ms) => ({ value: ms, label: `${ms / 1000}s` }));
+const DEFAULT_WAKE_WORD = 'KAIRO';
+
+const API_KEY_FIELDS: Array<{ provider: keyof APIKeys; label: string; placeholder: string }> = [
+  { provider: 'opencode', label: 'OpenCode Go', placeholder: 'oc_…' },
+  { provider: 'openai', label: 'OpenAI', placeholder: 'sk-…' },
+  { provider: 'anthropic', label: 'Anthropic', placeholder: 'sk-ant-…' },
+  { provider: 'google', label: 'Google AI', placeholder: 'AIza…' },
+  { provider: 'elevenlabs', label: 'ElevenLabs', placeholder: 'xi-…' },
+  { provider: 'minimax', label: 'MiniMax', placeholder: 'eyJ…' },
+  { provider: 'minimaxGroupId', label: 'MiniMax Group ID', placeholder: '17…' },
+  { provider: 'nvidia', label: 'NVIDIA Build', placeholder: 'nvapi-…' },
+];
+
 const LOG_COLORS: Record<LogLevel, string> = {
-  error: '#FF4444',
-  warn: '#FFAA00',
-  info: '#4488FF',
-  debug: '#888888',
+  error: COLORS.error,
+  warn: COLORS.warning,
+  info: COLORS.primary,
+  debug: COLORS.textMuted,
 };
 
-export const SettingsScreen: React.FC = () => {
-  const { settings, updateSettings, latencyMetrics, isBluetoothConnected, bluetoothDeviceName } = useAppStore();
+/* ─── Collapsible section ─────────────────────────── */
+const Section: React.FC<{
+  title: string;
+  subtitle?: string;
+  icon: IconName;
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}> = ({ title, subtitle, icon, expanded, onToggle, children }) => (
+  <View style={[styles.section, expanded && styles.sectionExpanded]}>
+    <Pressable
+      style={({ pressed }) => [styles.sectionHeader, pressed && { opacity: 0.75 }]}
+      onPress={onToggle}
+      accessibilityRole="button"
+      accessibilityState={{ expanded }}
+      accessibilityLabel={title}
+    >
+      <View style={[styles.sectionIcon, expanded && { backgroundColor: withAlpha(COLORS.primary, 0.16) }]}>
+        <Icon name={icon} size={20} color={expanded ? COLORS.primary : COLORS.textSecondary} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {subtitle ? <Text style={styles.sectionSubtitle} numberOfLines={1}>{subtitle}</Text> : null}
+      </View>
+      <Icon name={expanded ? 'chevron-up' : 'chevron-down'} size={22} color={expanded ? COLORS.primary : COLORS.textMuted} />
+    </Pressable>
+    {expanded ? <View style={styles.sectionBody}>{children}</View> : null}
+  </View>
+);
 
-  const [openaiKey, setOpenaiKey] = useState('');
-  const [anthropicKey, setAnthropicKey] = useState('');
-  const [googleKey, setGoogleKey] = useState('');
-  const [elevenlabsKey, setElevenlabsKey] = useState('');
-  const [minimaxKey, setMinimaxKey] = useState('');
-  const [opencodeKey, setOpencodeKey] = useState('');
-  const [nvidiaKey, setNvidiaKey] = useState('');
-  const [minimaxGroupId, setMinimaxGroupId] = useState('');
+export const SettingsScreen: React.FC = () => {
+  const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  const resetSettings = useAppStore((s) => s.resetSettings);
+  const latencyMetrics = useAppStore((s) => s.latencyMetrics);
+  const pipelineState = useAppStore((s) => s.pipelineState);
+  const isBluetoothConnected = useAppStore((s) => s.isBluetoothConnected);
+  const bluetoothDeviceName = useAppStore((s) => s.bluetoothDeviceName);
+
+  const [apiKeys, setApiKeys] = useState<Partial<Record<keyof APIKeys, string>>>({});
   const [showKeys, setShowKeys] = useState(false);
   const [logModalVisible, setLogModalVisible] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logFilter, setLogFilter] = useState<LogLevel | 'all'>('all');
   const [logCount, setLogCount] = useState(() => LogService.getLogs().length);
   const [testingPipeline, setTestingPipeline] = useState(false);
   const [checkingHermes, setCheckingHermes] = useState(false);
   const [switchingHermesModel, setSwitchingHermesModel] = useState<string | null>(null);
   const [hermesSummary, setHermesSummary] = useState('Sin comprobar');
   const [pairingCode, setPairingCode] = useState('');
-  const [proxyDeviceName, setProxyDeviceName] = useState('Amalio iPhone');
+  const [proxyDeviceName, setProxyDeviceName] = useState('iPhone');
   const [proxyDeviceSummary, setProxyDeviceSummary] = useState('No vinculado');
   const [pairingProxyDevice, setPairingProxyDevice] = useState(false);
   const [checkingProxyAuth, setCheckingProxyAuth] = useState(false);
   const [revokingProxyDevice, setRevokingProxyDevice] = useState(false);
   const [playingVoice, setPlayingVoice] = useState<string | null>(null);
   const [nativeVoices, setNativeVoices] = useState<TTSVoice[]>([]);
-  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<string | null>('assistant');
+  const [customWakeMode, setCustomWakeMode] = useState(() => settings.wakeWord.trim().toUpperCase() !== DEFAULT_WAKE_WORD);
+  const [wakeDraft, setWakeDraft] = useState(settings.wakeWord);
+  const [promptDraft, setPromptDraft] = useState(settings.systemPrompt);
+
+  // Follow external changes (personality presets, reset, async settings load).
+  useEffect(() => setPromptDraft(settings.systemPrompt), [settings.systemPrompt]);
+  useEffect(() => {
+    setWakeDraft(settings.wakeWord);
+    if (settings.wakeWord.trim().toUpperCase() !== DEFAULT_WAKE_WORD) setCustomWakeMode(true);
+  }, [settings.wakeWord]);
 
   useEffect(() => {
     loadKeys();
     loadProxyDeviceAuth();
-  }, []);
-
-  useEffect(() => {
     TTSService.getAvailableNativeVoices('')
-      .then((voices) => setNativeVoices(voices))
+      .then((voices) => setNativeVoices(voices.filter((voice) => /^(es|en)/i.test(voice.language))))
       .catch(() => setNativeVoices([]));
+    return LogService.subscribe(() => setLogCount(LogService.getLogs().length));
   }, []);
 
   useEffect(() => {
     if (!logModalVisible) return undefined;
-    setLogs(LogService.getLogs());
-    const unsub = LogService.subscribe(() => {
-      const nextLogs = LogService.getLogs();
-      setLogs([...nextLogs]);
-      setLogCount(nextLogs.length);
-    });
-    return unsub;
+    setLogs([...LogService.getLogs()]);
+    return LogService.subscribe(() => setLogs([...LogService.getLogs()]));
   }, [logModalVisible]);
+
+  const filteredLogs = useMemo(
+    () => (logFilter === 'all' ? logs : logs.filter((entry) => entry.level === logFilter)),
+    [logFilter, logs],
+  );
+
+  const toggleSection = useCallback((id: string) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpanded((current) => (current === id ? null : id));
+  }, []);
 
   const modelsForProvider = useMemo(
     () => LLM_MODELS.filter((model) => model.provider === settings.llmProvider),
     [settings.llmProvider],
   );
 
-  const nativeVoiceOptions = useMemo(
-    () => nativeVoices.map((voice) => ({
-      ...voice,
-      name: voice.name.replace(/\s+\([^)]+\)$/, ''),
-    })),
-    [nativeVoices],
-  );
-
   const voicesByProvider = useMemo(
     () => TTS_PROVIDERS.map((provider) => ({
       provider,
       voices: provider === 'native'
-        ? [...TTS_VOICES.filter((voice) => voice.provider === provider), ...nativeVoiceOptions]
+        ? [
+            ...TTS_VOICES.filter((voice) => voice.provider === provider),
+            ...nativeVoices.map((voice) => ({ ...voice, name: voice.name.replace(/\s+\([^)]+\)$/, '') })),
+          ]
         : TTS_VOICES.filter((voice) => voice.provider === provider),
     })).filter((group) => group.voices.length > 0),
-    [nativeVoiceOptions],
+    [nativeVoices],
   );
 
+  const currentModelName = modelsForProvider.find((m) => m.id === settings.llmModel)?.name ?? settings.llmModel;
+  const currentVoiceName = voicesByProvider
+    .flatMap((group) => group.voices)
+    .find((voice) => voice.provider === settings.ttsProvider && voice.id === settings.ttsVoice)?.name ?? settings.ttsVoice;
+  const activeListeningPreset = LISTENING_PRESETS.find((preset) => preset.silence === settings.silenceThresholdMs)?.value ?? null;
+  const activeRearmPreset = WAKE_REARM_PRESETS.find((preset) => preset.resume === settings.wakeWordResumeDelayMs)?.value ?? null;
+
+  /* ── Actions ── */
   const handleTestPipeline = useCallback(async () => {
     setTestingPipeline(true);
     LogService.info('Test', 'Starting pipeline test...');
@@ -143,11 +248,11 @@ export const SettingsScreen: React.FC = () => {
       );
       const elapsed = Date.now() - t0;
       LogService.info('Test', `LLM OK (${elapsed}ms): "${response}"`);
-      Alert.alert('Pipeline OK', `Respuesta en ${elapsed}ms:\n\n"${response}"`);
+      Alert.alert('Modelo OK', `Respuesta en ${formatSeconds(elapsed)}:\n\n"${response}"`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       LogService.error('Test', `Pipeline test failed: ${msg}`);
-      Alert.alert('Pipeline Error', msg);
+      Alert.alert('El modelo no responde', msg);
     } finally {
       setTestingPipeline(false);
     }
@@ -164,27 +269,28 @@ export const SettingsScreen: React.FC = () => {
         : [];
       const summary = [
         `${runtime?.provider ?? 'desconocido'}/${runtime?.model ?? 'sin modelo'}`,
-        runtime?.switching_enabled ? 'switch activo' : 'switch off',
-        enabledFeatures.length ? `${enabledFeatures.length} capacidades` : 'capacidades N/A',
+        runtime?.switching_enabled ? 'cambio de modelo activo' : 'cambio de modelo desactivado',
+        enabledFeatures.length ? `${enabledFeatures.length} capacidades` : 'capacidades N/D',
       ].join(' · ');
       setHermesSummary(summary);
       LogService.info('Hermes', `Status OK: ${summary}`);
-      Alert.alert('Hermes OK', summary);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setHermesSummary('Error');
+      setHermesSummary(`Error: ${msg}`);
       LogService.error('Hermes', `Status failed: ${msg}`);
-      Alert.alert('Hermes Error', msg);
     } finally {
       setCheckingHermes(false);
     }
   }, []);
 
+  const handleSelectProvider = useCallback((provider: LLMProvider) => {
+    const models = LLM_MODELS.filter((model) => model.provider === provider);
+    updateSettings({ llmProvider: provider, ...(models[0] ? { llmModel: models[0].id } : {}) });
+  }, [updateSettings]);
+
   const handleSelectLLMModel = useCallback(async (modelId: string) => {
     updateSettings({ llmModel: modelId });
-    if (settings.llmProvider !== 'hermes' || modelId === 'hermes-agent') {
-      return;
-    }
+    if (settings.llmProvider !== 'hermes' || modelId === 'hermes-agent') return;
 
     setSwitchingHermesModel(modelId);
     try {
@@ -195,21 +301,20 @@ export const SettingsScreen: React.FC = () => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       LogService.error('Hermes', `Model switch failed: ${msg}`);
-      Alert.alert('Hermes', `No se pudo cambiar el modelo: ${msg}`);
+      Alert.alert('Hermes', `No se pudo cambiar el modelo en el servidor: ${msg}`);
     } finally {
       setSwitchingHermesModel(null);
     }
   }, [settings.llmProvider, updateSettings]);
 
   const handleExportLogs = useCallback(async () => {
-    const text = LogService.exportAsText();
     try {
-      await Share.share({ message: text, title: 'SmartGlasses Logs' });
+      await Share.share({ message: LogService.exportAsText(), title: 'KAIRO logs' });
     } catch {}
   }, []);
 
   const handleClearLogs = useCallback(() => {
-    Alert.alert('Borrar logs', '¿Borrar todos los logs?', [
+    Alert.alert('Borrar logs', '¿Borrar todos los registros de diagnóstico?', [
       { text: 'Cancelar', style: 'cancel' },
       {
         text: 'Borrar',
@@ -217,61 +322,20 @@ export const SettingsScreen: React.FC = () => {
         onPress: async () => {
           await LogService.clear();
           setLogs([]);
-          setLogCount(0);
         },
       },
     ]);
   }, []);
 
-  const openLogModal = useCallback(() => {
-    const nextLogs = LogService.getLogs();
-    setLogs([...nextLogs]);
-    setLogCount(nextLogs.length);
-    setLogModalVisible(true);
-  }, []);
-
-  const toggleSection = useCallback((sectionId: string) => {
-    setExpandedSections((state) => ({ ...state, [sectionId]: !state[sectionId] }));
-  }, []);
-
-  const renderSection = (
-    sectionId: string,
-    title: string,
-    icon: string,
-    children: () => React.ReactNode,
-    subtitle?: string,
-  ) => {
-    const expanded = Boolean(expandedSections[sectionId]);
-    return (
-      <View style={styles.section}>
-        <TouchableOpacity
-          style={styles.collapsibleHeader}
-          onPress={() => toggleSection(sectionId)}
-          activeOpacity={0.75}
-        >
-          <View style={styles.collapsibleTitleRow}>
-            <Icon name={icon as any} size={20} color={expanded ? COLORS.primary : COLORS.textSecondary} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.sectionTitle}>{title}</Text>
-              {subtitle ? <Text style={styles.sectionSubtitle} numberOfLines={1}>{subtitle}</Text> : null}
-            </View>
-          </View>
-          <Icon
-            name={expanded ? 'chevron-up' : 'chevron-down'}
-            size={24}
-            color={expanded ? COLORS.primary : COLORS.textSecondary}
-          />
-        </TouchableOpacity>
-        {expanded ? <View style={styles.sectionBody}>{children()}</View> : null}
-      </View>
-    );
-  };
-
   const handlePlayVoiceDemo = useCallback(async (voice: TTSVoice) => {
     if (playingVoice) return;
+    if (pipelineState !== 'idle') {
+      Alert.alert('KAIRO está ocupado', 'Espera a que termine el turno actual para probar voces.');
+      return;
+    }
     setPlayingVoice(voice.id);
     try {
-      await TTSService.synthesize('Hola, soy tu asistente de voz. Estoy lista para ayudarte rápido y con naturalidad.', voice.provider as TTSProvider, voice.id, {
+      await TTSService.synthesize('Hola, soy KAIRO. Así sonará mi voz cuando te responda.', voice.provider, voice.id, {
         language: voice.language === 'multi' ? settings.ttsLanguage : voice.language,
         rate: settings.ttsRate,
         pitch: settings.ttsPitch,
@@ -281,31 +345,17 @@ export const SettingsScreen: React.FC = () => {
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      Alert.alert('Error', `No se pudo reproducir la demo: ${msg}`);
+      Alert.alert('No se pudo reproducir', msg);
     } finally {
       setPlayingVoice(null);
     }
-  }, [playingVoice, settings.ttsLanguage, settings.ttsNativeVoiceId, settings.ttsPitch, settings.ttsRate]);
+  }, [pipelineState, playingVoice, settings.ttsLanguage, settings.ttsNativeVoiceId, settings.ttsPitch, settings.ttsRate]);
 
   const loadKeys = async () => {
-    const keys = await Promise.all([
-      SecureStorage.getAPIKey('openai'),
-      SecureStorage.getAPIKey('anthropic'),
-      SecureStorage.getAPIKey('google'),
-      SecureStorage.getAPIKey('elevenlabs'),
-      SecureStorage.getAPIKey('minimax'),
-      SecureStorage.getAPIKey('opencode'),
-      SecureStorage.getAPIKey('nvidia'),
-      SecureStorage.getAPIKey('minimaxGroupId'),
-    ]);
-    setOpenaiKey(keys[0] || '');
-    setAnthropicKey(keys[1] || '');
-    setGoogleKey(keys[2] || '');
-    setElevenlabsKey(keys[3] || '');
-    setMinimaxKey(keys[4] || '');
-    setOpencodeKey(keys[5] || '');
-    setNvidiaKey(keys[6] || '');
-    setMinimaxGroupId(keys[7] || '');
+    const entries = await Promise.all(
+      API_KEY_FIELDS.map(async ({ provider }) => [provider, (await SecureStorage.getAPIKey(provider)) || ''] as const),
+    );
+    setApiKeys(Object.fromEntries(entries));
   };
 
   const loadProxyDeviceAuth = async () => {
@@ -314,12 +364,11 @@ export const SettingsScreen: React.FC = () => {
       setProxyDeviceSummary('No vinculado');
       return;
     }
-
     const expires = auth.expiresAt
       ? new Date(auth.expiresAt * 1000).toLocaleDateString('es-ES')
       : 'sin caducidad';
-    setProxyDeviceName(auth.deviceName || 'Amalio iPhone');
-    setProxyDeviceSummary(`${auth.deviceName || 'iPhone'} · ${auth.deviceId.slice(0, 12)} · exp ${expires}`);
+    setProxyDeviceName(auth.deviceName || 'iPhone');
+    setProxyDeviceSummary(`${auth.deviceName || 'iPhone'} · caduca ${expires}`);
   };
 
   const handlePairProxyDevice = useCallback(async () => {
@@ -328,7 +377,6 @@ export const SettingsScreen: React.FC = () => {
       Alert.alert('Código requerido', 'Introduce el código de vinculación generado en el servidor.');
       return;
     }
-
     setPairingProxyDevice(true);
     try {
       const result = await LLMService.pairProxyDevice(code, proxyDeviceName);
@@ -349,7 +397,7 @@ export const SettingsScreen: React.FC = () => {
       const status = await LLMService.getProxyAuthStatus();
       const device = status.device;
       const summary = device
-        ? `${device.name} · ${device.id.slice(0, 12)} · ${device.scopes.join(', ')}`
+        ? `${device.name} · ${device.scopes.join(', ')}`
         : status.device_auth_enabled ? 'Autenticado' : 'Auth por dispositivo desactivada';
       setProxyDeviceSummary(summary);
       Alert.alert('Proxy seguro OK', summary);
@@ -384,20 +432,19 @@ export const SettingsScreen: React.FC = () => {
     ]);
   }, []);
 
-  const saveKey = useCallback(async (provider: keyof APIKeys, value: string) => {
-    try {
-      const saved = await SecureStorage.saveAPIKey(provider, value.trim());
-      if (!saved) {
-        Alert.alert('Error', 'No se pudo guardar la API key');
-        return;
-      }
-      Alert.alert('Guardado', `API Key de ${provider} guardada correctamente`);
-    } catch (error) {
-      Alert.alert('Error', 'No se pudo guardar la API key');
+  const saveKey = useCallback(async (provider: keyof APIKeys, label: string) => {
+    const value = (apiKeys[provider] ?? '').trim();
+    const ok = value
+      ? await SecureStorage.saveAPIKey(provider, value)
+      : await SecureStorage.deleteAPIKey(provider);
+    if (!ok) {
+      Alert.alert('Error', `No se pudo guardar la clave de ${label}.`);
+      return;
     }
-  }, []);
+    Alert.alert(value ? 'Clave guardada' : 'Clave eliminada', `${label}: ${value ? 'guardada en el llavero del iPhone' : 'eliminada'}.`);
+  }, [apiKeys]);
 
-  const applyResponseStylePreset = useCallback((presetId: 'instant' | 'balanced' | 'natural') => {
+  const applyResponseStylePreset = useCallback((presetId: ResponseStyle) => {
     const preset = RESPONSE_STYLE_PRESETS.find((item) => item.id === presetId);
     if (!preset) return;
     updateSettings({
@@ -408,835 +455,669 @@ export const SettingsScreen: React.FC = () => {
     });
   }, [updateSettings]);
 
-  const renderKeyInput = (
-    label: string,
-    provider: keyof APIKeys,
-    value: string,
-    setter: (v: string) => void,
-    placeholder: string,
-  ) => (
-    <View style={styles.keyRow}>
-      <Text style={styles.keyLabel}>{label}</Text>
-      <View style={styles.keyInputRow}>
-        <TextInput
-          style={styles.keyInput}
-          value={value}
-          onChangeText={setter}
-          placeholder={placeholder}
-          placeholderTextColor={COLORS.textSecondary}
-          secureTextEntry={!showKeys}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <TouchableOpacity
-          style={styles.saveButton}
-          onPress={() => saveKey(provider, value)}
-        >
-          <Icon name="content-save" size={20} color={COLORS.primary} />
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
+  const commitWakeWord = () => {
+    const value = wakeDraft.trim();
+    if (value.length < 3) {
+      Alert.alert('Palabra demasiado corta', 'Usa al menos 3 letras para evitar activaciones por error.');
+      setWakeDraft(settings.wakeWord);
+      return;
+    }
+    if (value !== settings.wakeWord) updateSettings({ wakeWord: value });
+  };
+
+  const handleWakeMode = (mode: 'kairo' | 'custom') => {
+    if (mode === 'kairo') {
+      setCustomWakeMode(false);
+      updateSettings({ wakeWord: DEFAULT_WAKE_WORD, wakeWordLang: 'es-ES' });
+    } else {
+      setCustomWakeMode(true);
+    }
+  };
+
+  const handleResetSettings = () => {
+    Alert.alert(
+      'Restablecer ajustes',
+      'Se restaurarán los valores por defecto de voz, modelo y escucha. Tus conversaciones, perfil y claves no se tocan.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Restablecer', style: 'destructive', onPress: () => { setCustomWakeMode(false); resetSettings(); } },
+      ],
+    );
+  };
+
+  const promptDirty = promptDraft !== settings.systemPrompt;
+  const personality = PERSONALITY_PRESETS.find((p) => p.id === settings.personalityId);
 
   const renderLogEntry = useCallback(({ item }: { item: LogEntry }) => (
     <View style={styles.logEntry}>
       <View style={styles.logMeta}>
-        <Text style={[styles.logLevel, { color: LOG_COLORS[item.level] }]}>
-          {item.level.toUpperCase()}
-        </Text>
-        <Text style={styles.logTag}>[{item.tag}]</Text>
+        <Text style={[styles.logLevel, { color: LOG_COLORS[item.level] }]}>{item.level.toUpperCase()}</Text>
+        <Text style={styles.logTag}>{item.tag}</Text>
         <Text style={styles.logTime}>
-          {new Date(item.timestamp).toLocaleTimeString('es-ES', {
-            hour: '2-digit', minute: '2-digit', second: '2-digit',
-          })}
+          {new Date(item.timestamp).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
         </Text>
       </View>
-      <Text style={styles.logMessage}>{item.message}</Text>
+      <Text style={styles.logMessage} selectable>{item.message}</Text>
     </View>
   ), []);
 
-  const keyLogEntry = useCallback((item: LogEntry) => item.id, []);
-
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.consoleHeader}>
-          <View style={styles.headerTitleRow}>
-            <Icon name="shield-half-full" size={24} color={COLORS.primary} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.title}>KAIRO Console</Text>
-              <Text style={styles.headerSubtitle}>
-                {settings.llmProvider}/{settings.llmModel} · {settings.ttsProvider}/{settings.ttsVoice}
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          <ScreenHeader title="Ajustes" subtitle="Personaliza cómo escucha, piensa y habla KAIRO." />
+
+          {/* ── Status overview ── */}
+          <Card style={styles.overview}>
+            <View style={styles.overviewItem}>
+              <Icon name="glasses" size={18} color={isBluetoothConnected ? COLORS.success : COLORS.textMuted} />
+              <Text style={styles.overviewLabel}>Gafas</Text>
+              <Text style={[styles.overviewValue, { color: isBluetoothConnected ? COLORS.success : COLORS.textSecondary }]} numberOfLines={1}>
+                {isBluetoothConnected ? bluetoothDeviceName || 'Conectadas' : 'Sin conexión'}
               </Text>
             </View>
-          </View>
-          <View style={styles.headerMetrics}>
-            <View style={styles.metricPill}>
-              <Text style={styles.metricLabel}>BLE</Text>
-              <Text style={[styles.metricValue, { color: isBluetoothConnected ? COLORS.success : COLORS.error }]}>
-                {isBluetoothConnected ? bluetoothDeviceName || 'OK' : 'OFF'}
-              </Text>
+            <View style={styles.overviewDivider} />
+            <View style={styles.overviewItem}>
+              <Icon name="timer-outline" size={18} color={COLORS.primary} />
+              <Text style={styles.overviewLabel}>Latencia</Text>
+              <Text style={styles.overviewValue}>{formatSeconds(latencyMetrics?.totalMs)}</Text>
             </View>
-            <View style={styles.metricPill}>
-              <Text style={styles.metricLabel}>LAT</Text>
-              <Text style={styles.metricValue}>
-                {latencyMetrics?.totalMs ? `${(latencyMetrics.totalMs / 1000).toFixed(1)}s` : 'N/A'}
-              </Text>
+            <View style={styles.overviewDivider} />
+            <View style={styles.overviewItem}>
+              <Icon name={settings.continuousConversation ? 'autorenew' : 'microphone-outline'} size={18} color={COLORS.speaking} />
+              <Text style={styles.overviewLabel}>Modo</Text>
+              <Text style={styles.overviewValue}>{settings.continuousConversation ? 'Continuo' : 'Por turnos'}</Text>
             </View>
-            <View style={styles.metricPill}>
-              <Text style={styles.metricLabel}>MODE</Text>
-              <Text style={[styles.metricValue, { color: settings.continuousConversation ? COLORS.success : COLORS.textSecondary }]}>
-                {settings.continuousConversation ? 'LIVE' : 'WAKE'}
-              </Text>
-            </View>
-          </View>
-        </View>
+          </Card>
 
-        {renderSection('api', 'API Keys', 'key-variant', () => (
-          <>
-            <View style={styles.inlineSectionAction}>
-              <Text style={styles.hintText}>Guarda credenciales locales para proveedores directos.</Text>
-              <TouchableOpacity style={styles.iconOnlyButton} onPress={() => setShowKeys(!showKeys)}>
-                <Icon name={showKeys ? 'eye-off' : 'eye'} size={20} color={COLORS.primary} />
-              </TouchableOpacity>
-            </View>
-            {renderKeyInput('OpenAI', 'openai', openaiKey, setOpenaiKey, 'sk-...')}
-            {renderKeyInput('Anthropic', 'anthropic', anthropicKey, setAnthropicKey, 'sk-ant-...')}
-            {renderKeyInput('Google', 'google', googleKey, setGoogleKey, 'AIza...')}
-            {renderKeyInput('ElevenLabs', 'elevenlabs', elevenlabsKey, setElevenlabsKey, 'xi-...')}
-            {renderKeyInput('MiniMax', 'minimax', minimaxKey, setMinimaxKey, 'eyJ...')}
-            {renderKeyInput('OpenCode Go', 'opencode', opencodeKey, setOpencodeKey, 'oc_...')}
-            {renderKeyInput('NVIDIA Build', 'nvidia', nvidiaKey, setNvidiaKey, 'nvapi-...')}
-            {renderKeyInput('MiniMax Group ID', 'minimaxGroupId', minimaxGroupId, setMinimaxGroupId, '17...')}
-          </>
-        ), showKeys ? 'Claves visibles' : 'Claves ocultas')}
-
-        {renderSection('proxySecurity', 'Seguridad del Proxy', 'cellphone-key', () => (
-          <>
-            <Text style={styles.hintText}>
-              Vincula este iPhone con un código temporal del servidor. El token queda en el llavero del dispositivo y se usa para Hermes, OpenCode, tareas y voz del proxy.
-            </Text>
-
-            <View style={styles.statusPanel}>
-              <Text style={styles.statusPanelLabel}>DISPOSITIVO</Text>
-              <Text style={styles.statusPanelValue}>{proxyDeviceSummary}</Text>
+          {/* ── Assistant ── */}
+          <Section
+            title="Asistente"
+            subtitle={`${personality?.name ?? 'Personalizado'} · ${RESPONSE_STYLE_PRESETS.find((p) => p.id === settings.responseStyle)?.name ?? ''}`}
+            icon="account-voice"
+            expanded={expanded === 'assistant'}
+            onToggle={() => toggleSection('assistant')}
+          >
+            <SectionLabel style={styles.firstLabel}>Personalidad</SectionLabel>
+            <View style={styles.cardGrid}>
+              {PERSONALITY_PRESETS.map((p) => {
+                const active = settings.personalityId === p.id;
+                return (
+                  <Pressable
+                    key={p.id}
+                    style={({ pressed }) => [styles.choiceCard, active && styles.choiceCardActive, pressed && { opacity: 0.75 }]}
+                    onPress={() => updateSettings({ personalityId: p.id, systemPrompt: p.systemPromptPrefix })}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: active }}
+                    accessibilityLabel={`${p.name}. ${p.description}`}
+                  >
+                    <Icon name={p.icon as IconName} size={22} color={active ? COLORS.primary : COLORS.textSecondary} />
+                    <Text style={[styles.choiceTitle, active && { color: COLORS.primary }]}>{p.name}</Text>
+                    <Text style={styles.choiceDesc}>{p.description}</Text>
+                  </Pressable>
+                );
+              })}
             </View>
 
-            <Text style={styles.subsectionTitle}>Nombre del dispositivo</Text>
+            <SectionLabel>Estilo de respuesta</SectionLabel>
+            <OptionGroup
+              options={RESPONSE_STYLE_PRESETS.map((preset) => ({ value: preset.id, label: preset.name }))}
+              value={settings.responseStyle}
+              onChange={applyResponseStylePreset}
+            />
+            <Hint style={styles.hintBelow}>
+              {RESPONSE_STYLE_PRESETS.find((p) => p.id === settings.responseStyle)?.description}
+            </Hint>
+
+            <SectionLabel>Palabra de activación</SectionLabel>
+            <OptionGroup
+              options={[
+                { value: 'kairo', label: DEFAULT_WAKE_WORD, icon: 'shield-half-full' },
+                { value: 'custom', label: 'Personalizada', icon: 'pencil-outline' },
+              ]}
+              value={customWakeMode ? 'custom' : 'kairo'}
+              onChange={handleWakeMode}
+            />
+            {customWakeMode ? (
+              <View style={styles.inlineInputRow}>
+                <TextInput
+                  style={[styles.input, styles.flex]}
+                  value={wakeDraft}
+                  onChangeText={setWakeDraft}
+                  onBlur={commitWakeWord}
+                  onSubmitEditing={commitWakeWord}
+                  placeholder="Ej. Oye Nova"
+                  placeholderTextColor={COLORS.textMuted}
+                  autoCapitalize="words"
+                  autoCorrect={false}
+                  returnKeyType="done"
+                  maxLength={30}
+                  accessibilityLabel="Palabra de activación personalizada"
+                />
+              </View>
+            ) : null}
+            <Hint style={styles.hintBelow}>
+              También es el nombre visible del asistente. Las palabras cortas y poco comunes funcionan mejor.
+            </Hint>
+
+            <Divider style={styles.divider} />
+            <ToggleRow
+              title="Conversación continua"
+              subtitle="Tras responder vuelve a escuchar sin repetir la palabra de activación"
+              icon="autorenew"
+              value={settings.continuousConversation}
+              onValueChange={(value) => updateSettings({ continuousConversation: value })}
+            />
+            <ToggleRow
+              title="Interrumpir con el botón"
+              subtitle="El botón de las gafas corta la respuesta y te escucha"
+              icon="gesture-tap-button"
+              value={settings.interruptSpeechWithButton}
+              onValueChange={(value) => updateSettings({ interruptSpeechWithButton: value })}
+            />
+            <ToggleRow
+              title="Interrumpir con la voz"
+              subtitle={`Decir "${settings.wakeWord}" mientras habla lo interrumpe`}
+              icon="account-voice"
+              value={settings.interruptSpeechWithWakeWord}
+              onValueChange={(value) => updateSettings({ interruptSpeechWithWakeWord: value })}
+            />
+          </Section>
+
+          {/* ── Model ── */}
+          <Section
+            title="Modelo de IA"
+            subtitle={`${LLM_PROVIDER_LABELS[settings.llmProvider]} · ${currentModelName.replace(/^Hermes \/\s*/, '')}`}
+            icon="brain"
+            expanded={expanded === 'llm'}
+            onToggle={() => toggleSection('llm')}
+          >
+            <SectionLabel style={styles.firstLabel}>Proveedor</SectionLabel>
+            <OptionGroup
+              options={LLM_PROVIDERS.map((provider) => ({ value: provider, label: LLM_PROVIDER_LABELS[provider] }))}
+              value={settings.llmProvider}
+              onChange={handleSelectProvider}
+            />
+            <SectionLabel>Modelo</SectionLabel>
+            <OptionGroup
+              options={modelsForProvider.map((model) => ({
+                value: model.id,
+                label: switchingHermesModel === model.id ? 'Cambiando…' : model.name.replace(/^Hermes \/\s*/, ''),
+              }))}
+              value={settings.llmModel}
+              onChange={handleSelectLLMModel}
+              disabled={switchingHermesModel !== null}
+            />
+            {settings.llmProvider === 'hermes' ? (
+              <Hint style={styles.hintBelow}>
+                Hermes mantiene su propia memoria y herramientas en el servidor. Cambiar de modelo reinicia Hermes (unos segundos).
+              </Hint>
+            ) : (
+              <Hint style={styles.hintBelow}>
+                Se envían las últimas respuestas de la conversación actual como contexto.
+              </Hint>
+            )}
+            <Button
+              label={testingPipeline ? 'Probando…' : 'Probar modelo'}
+              icon="flask-outline"
+              onPress={handleTestPipeline}
+              loading={testingPipeline}
+              style={styles.sectionButton}
+            />
+          </Section>
+
+          {/* ── Voice ── */}
+          <Section
+            title="Voz"
+            subtitle={settings.voiceMode === 'grok' ? `Grok Realtime · ${settings.grokVoiceId}` : currentVoiceName}
+            icon="waveform"
+            expanded={expanded === 'voice'}
+            onToggle={() => toggleSection('voice')}
+          >
+            <SectionLabel style={styles.firstLabel}>Modo de voz</SectionLabel>
+            <OptionGroup
+              options={[
+                { value: 'pipeline', label: 'Estándar', icon: 'transit-connection-variant' },
+                { value: 'grok', label: 'Grok Realtime', icon: 'lightning-bolt' },
+              ]}
+              value={settings.voiceMode}
+              onChange={(mode) => updateSettings({ voiceMode: mode })}
+            />
+            <Hint style={styles.hintBelow}>
+              {settings.voiceMode === 'grok'
+                ? 'Conversación voz a voz con Grok (de pago, ~0,05 $/min). Requiere build nativa en iOS. El wake word se desactiva en este modo.'
+                : 'Escucha → modelo → voz. El más barato; con Kokoro la respuesta empieza a sonar en menos de un segundo.'}
+            </Hint>
+
+            {settings.voiceMode === 'grok' ? (
+              <>
+                <SectionLabel>Voz de Grok</SectionLabel>
+                <OptionGroup
+                  options={GROK_VOICES.map((voice) => ({ value: voice.id, label: voice.name }))}
+                  value={settings.grokVoiceId}
+                  onChange={(id) => updateSettings({ grokVoiceId: id })}
+                />
+              </>
+            ) : (
+              <>
+                {voicesByProvider.map(({ provider, voices }) => (
+                  <View key={provider}>
+                    <SectionLabel>{TTS_PROVIDER_LABELS[provider]}</SectionLabel>
+                    <View style={styles.voiceList}>
+                      {voices.map((voice) => {
+                        const active = settings.ttsProvider === provider && settings.ttsVoice === voice.id;
+                        return (
+                          <View key={`${provider}-${voice.id}`} style={[styles.voiceRow, active && styles.voiceRowActive]}>
+                            <Pressable
+                              style={styles.voiceSelect}
+                              onPress={() => updateSettings({
+                                ttsProvider: provider,
+                                ttsVoice: voice.id,
+                                ttsNativeVoiceId: provider === 'native' && !voice.id.startsWith('native-')
+                                  ? voice.id
+                                  : settings.ttsNativeVoiceId,
+                                ttsLanguage: voice.language === 'multi' ? settings.ttsLanguage : voice.language,
+                              })}
+                              accessibilityRole="radio"
+                              accessibilityState={{ checked: active }}
+                              accessibilityLabel={voice.name}
+                            >
+                              <Icon
+                                name={active ? 'radiobox-marked' : 'radiobox-blank'}
+                                size={20}
+                                color={active ? COLORS.primary : COLORS.textMuted}
+                              />
+                              <Text style={[styles.voiceName, active && { color: COLORS.primary }]} numberOfLines={1}>
+                                {voice.name}
+                              </Text>
+                            </Pressable>
+                            <IconButton
+                              icon={playingVoice === voice.id ? 'volume-high' : 'play-circle-outline'}
+                              label={`Escuchar ${voice.name}`}
+                              onPress={() => handlePlayVoiceDemo(voice)}
+                              disabled={playingVoice !== null && playingVoice !== voice.id}
+                              color={playingVoice === voice.id ? COLORS.accent : COLORS.textSecondary}
+                              size={22}
+                            />
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ))}
+                {settings.ttsProvider === 'kokoro' ? (
+                  <Card tone={COLORS.success} style={styles.noteCard}>
+                    <Text style={styles.noteTitle}>⚡ Modo baja latencia activo</Text>
+                    <Hint>
+                      Kokoro en streaming solapa la respuesta del modelo, la síntesis y la reproducción. Combínalo con el estilo «Ultra-rápido».
+                    </Hint>
+                  </Card>
+                ) : null}
+
+                <SectionLabel>Velocidad</SectionLabel>
+                <OptionGroup
+                  options={TTS_RATE_OPTIONS}
+                  value={TTS_RATE_OPTIONS.find((o) => Math.abs(o.value - settings.ttsRate) < 0.01)?.value ?? null}
+                  onChange={(rate) => updateSettings({ ttsRate: rate })}
+                />
+                <SectionLabel>Tono</SectionLabel>
+                <OptionGroup
+                  options={TTS_PITCH_OPTIONS}
+                  value={TTS_PITCH_OPTIONS.find((o) => Math.abs(o.value - settings.ttsPitch) < 0.01)?.value ?? null}
+                  onChange={(pitch) => updateSettings({ ttsPitch: pitch })}
+                />
+              </>
+            )}
+          </Section>
+
+          {/* ── Listening & latency ── */}
+          <Section
+            title="Escucha y rendimiento"
+            subtitle={`Corte ${LISTENING_PRESETS.find((p) => p.value === activeListeningPreset)?.label ?? 'personalizado'} · timeout ${settings.llmRequestTimeoutMs / 1000}s`}
+            icon="speedometer"
+            expanded={expanded === 'performance'}
+            onToggle={() => toggleSection('performance')}
+          >
+            <SectionLabel style={styles.firstLabel}>Fin de frase</SectionLabel>
+            <OptionGroup
+              options={LISTENING_PRESETS.map((preset) => ({ value: preset.value, label: preset.label }))}
+              value={activeListeningPreset}
+              onChange={(value) => {
+                const preset = LISTENING_PRESETS.find((item) => item.value === value);
+                if (preset) {
+                  updateSettings({
+                    silenceThresholdMs: preset.silence,
+                    finalSilenceThresholdMs: preset.final,
+                    sttStopTimeoutMs: preset.stop,
+                  });
+                }
+              }}
+            />
+            <Hint style={styles.hintBelow}>Cuánto silencio espera antes de dar por terminada tu frase.</Hint>
+
+            <SectionLabel>Rearme de la palabra de activación</SectionLabel>
+            <OptionGroup
+              options={WAKE_REARM_PRESETS.map((preset) => ({ value: preset.value, label: preset.label }))}
+              value={activeRearmPreset}
+              onChange={(value) => {
+                const preset = WAKE_REARM_PRESETS.find((item) => item.value === value);
+                if (preset) {
+                  updateSettings({
+                    wakeWordResumeDelayMs: preset.resume,
+                    wakeWordCooldownMs: preset.cooldown,
+                    wakeWordMinTriggerIntervalMs: preset.trigger,
+                  });
+                }
+              }}
+            />
+            <Hint style={styles.hintBelow}>«Anti-eco» evita que KAIRO se active con su propia voz por los altavoces.</Hint>
+
+            <SectionLabel>Tiempo máximo de respuesta</SectionLabel>
+            <OptionGroup
+              options={LLM_TIMEOUT_OPTIONS}
+              value={settings.llmRequestTimeoutMs}
+              onChange={(timeout) => updateSettings({ llmRequestTimeoutMs: timeout })}
+            />
+
+            <Divider style={styles.divider} />
+            <ToggleRow
+              title="Respuesta en streaming"
+              subtitle="Muestra el texto mientras el modelo lo genera (Hermes/OpenCode)"
+              icon="text-box-outline"
+              value={settings.streamingEnabled}
+              onValueChange={(value) => updateSettings({ streamingEnabled: value })}
+            />
+            <ToggleRow
+              title="Hablar frase a frase"
+              subtitle="Empieza a hablar antes de tener la respuesta completa"
+              icon="format-quote-open"
+              value={settings.ttsChunkedPlaybackEnabled}
+              onValueChange={(value) => updateSettings({ ttsChunkedPlaybackEnabled: value })}
+              disabled={!settings.streamingEnabled}
+            />
+          </Section>
+
+          {/* ── Bluetooth ── */}
+          <Section
+            title="Gafas Bluetooth"
+            subtitle={settings.autoConnectBluetooth ? 'Reconexión automática' : 'Conexión manual'}
+            icon="bluetooth-connect"
+            expanded={expanded === 'bluetooth'}
+            onToggle={() => toggleSection('bluetooth')}
+          >
+            <ToggleRow
+              title="Reconexión automática"
+              subtitle="Vuelve a enlazar las gafas si se pierde la conexión"
+              icon="bluetooth-connect"
+              value={settings.autoConnectBluetooth}
+              onValueChange={(value) => updateSettings({ autoConnectBluetooth: value })}
+            />
+            <ToggleRow
+              title="Buscar al abrir la app"
+              subtitle="Escaneo corto para encontrar las gafas al arrancar"
+              icon="radar"
+              value={settings.autoScanBluetoothOnLaunch}
+              onValueChange={(value) => updateSettings({ autoScanBluetoothOnLaunch: value })}
+            />
+            <SectionLabel>Duración del escaneo</SectionLabel>
+            <OptionGroup
+              options={BLE_SCAN_OPTIONS}
+              value={settings.bluetoothAutoScanDurationMs}
+              onChange={(value) => updateSettings({ bluetoothAutoScanDurationMs: value })}
+            />
+            <SectionLabel>Comprobar conexión cada</SectionLabel>
+            <OptionGroup
+              options={BLE_WATCH_OPTIONS}
+              value={settings.bluetoothAutoReconnectIntervalMs}
+              onChange={(value) => updateSettings({ bluetoothAutoReconnectIntervalMs: value })}
+            />
+            <Hint style={styles.hintBelow}>El intervalo se aplica la próxima vez que abras la app.</Hint>
+          </Section>
+
+          {/* ── System prompt ── */}
+          <Section
+            title="Instrucciones del sistema"
+            subtitle={promptDirty ? 'Cambios sin guardar' : 'Prompt base del asistente'}
+            icon="script-text-outline"
+            expanded={expanded === 'prompt'}
+            onToggle={() => toggleSection('prompt')}
+          >
             <TextInput
-              style={styles.wakeWordInput}
+              style={[styles.input, styles.promptInput]}
+              value={promptDraft}
+              onChangeText={setPromptDraft}
+              multiline
+              placeholderTextColor={COLORS.textMuted}
+              placeholder="Instrucciones del sistema…"
+              accessibilityLabel="Instrucciones del sistema"
+            />
+            <View style={styles.buttonRow}>
+              <Button
+                label="Descartar"
+                variant="secondary"
+                compact
+                onPress={() => setPromptDraft(settings.systemPrompt)}
+                disabled={!promptDirty}
+                style={styles.flex}
+              />
+              <Button
+                label="Guardar"
+                icon="content-save-outline"
+                variant="primary"
+                compact
+                onPress={() => updateSettings({ systemPrompt: promptDraft.trim() || settings.systemPrompt })}
+                disabled={!promptDirty}
+                style={styles.flex}
+              />
+            </View>
+            <Hint style={styles.hintBelow}>Elegir una personalidad reemplaza estas instrucciones.</Hint>
+          </Section>
+
+          {/* ── Proxy security ── */}
+          <Section
+            title="Seguridad del proxy"
+            subtitle={proxyDeviceSummary}
+            icon="cellphone-key"
+            expanded={expanded === 'proxy'}
+            onToggle={() => toggleSection('proxy')}
+          >
+            <Hint style={styles.firstHint}>
+              Vincula este iPhone con un código temporal del servidor. El token se guarda en el llavero y se usa para Hermes, OpenCode y la voz del proxy.
+            </Hint>
+            <Card style={styles.statusCard} padded>
+              <Text style={styles.statusLabel}>DISPOSITIVO</Text>
+              <Text style={styles.statusValue}>{proxyDeviceSummary}</Text>
+            </Card>
+
+            <SectionLabel>Nombre del dispositivo</SectionLabel>
+            <TextInput
+              style={styles.input}
               value={proxyDeviceName}
               onChangeText={setProxyDeviceName}
-              placeholder="Amalio iPhone"
-              placeholderTextColor={COLORS.textSecondary}
+              placeholder="iPhone"
+              placeholderTextColor={COLORS.textMuted}
               autoCapitalize="words"
             />
 
-            <Text style={styles.subsectionTitle}>Código de vinculación</Text>
-            <View style={styles.keyInputRow}>
+            <SectionLabel>Código de vinculación</SectionLabel>
+            <View style={styles.inlineInputRow}>
               <TextInput
-                style={styles.keyInput}
+                style={[styles.input, styles.flex, { fontFamily: MONO_FONT }]}
                 value={pairingCode}
                 onChangeText={setPairingCode}
                 placeholder="SG-XXXXXX"
-                placeholderTextColor={COLORS.textSecondary}
+                placeholderTextColor={COLORS.textMuted}
                 autoCapitalize="characters"
                 autoCorrect={false}
               />
-              <TouchableOpacity
-                style={styles.saveButton}
+              <Button
+                label="Vincular"
+                icon="link-variant"
+                variant="primary"
                 onPress={handlePairProxyDevice}
-                disabled={pairingProxyDevice}
-              >
-                <Icon name={pairingProxyDevice ? 'loading' : 'link-variant'} size={20} color={COLORS.primary} />
-              </TouchableOpacity>
+                loading={pairingProxyDevice}
+                disabled={!pairingCode.trim()}
+              />
             </View>
 
-            <TouchableOpacity
-              style={[styles.diagButton, { marginTop: 12 }]}
-              onPress={handleCheckProxyAuth}
-              disabled={checkingProxyAuth}
-            >
-              <Icon name="shield-check-outline" size={20} color={COLORS.primary} />
-              <Text style={styles.diagButtonText}>
-                {checkingProxyAuth ? 'Comprobando...' : 'Comprobar token del iPhone'}
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.diagButton}
-              onPress={handleRevokeProxyDevice}
-              disabled={revokingProxyDevice}
-            >
-              <Icon name="cellphone-remove" size={20} color={COLORS.error} />
-              <Text style={[styles.diagButtonText, { color: COLORS.error }]}>
-                {revokingProxyDevice ? 'Desvinculando...' : 'Desvincular este iPhone'}
-              </Text>
-            </TouchableOpacity>
-          </>
-        ), proxyDeviceSummary)}
-
-        {renderSection('llm', 'Proveedor LLM', 'brain', () => (
-          <>
-          <View style={styles.optionsRow}>
-            {LLM_PROVIDERS.map((p) => (
-              <TouchableOpacity
-                key={p}
-                style={[styles.optionChip, settings.llmProvider === p && styles.optionChipActive]}
-                onPress={() => {
-                  updateSettings({ llmProvider: p });
-                  const models = LLM_MODELS.filter(m => m.provider === p);
-                  if (models.length > 0) {
-                    updateSettings({ llmModel: models[0].id });
-                  }
-                }}
-              >
-                <Text style={[styles.optionText, settings.llmProvider === p && styles.optionTextActive]}>
-                  {p.charAt(0).toUpperCase() + p.slice(1)}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <Text style={styles.subsectionTitle}>Modelo</Text>
-          <View style={styles.optionsRow}>
-            {modelsForProvider.map((model) => (
-              <TouchableOpacity
-                key={model.id}
-                style={[styles.optionChip, settings.llmModel === model.id && styles.optionChipActive]}
-                onPress={() => handleSelectLLMModel(model.id)}
-                disabled={switchingHermesModel !== null}
-              >
-                <Text style={[styles.optionText, settings.llmModel === model.id && styles.optionTextActive]}>
-                  {switchingHermesModel === model.id ? 'Cambiando...' : model.name}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          </>
-        ), `${settings.llmProvider}/${settings.llmModel}`)}
-
-        {renderSection('voiceMode', 'Modo de Voz', 'waveform', () => (
-          <>
-          <Text style={styles.hintText}>
-            «Pipeline» usa tu flujo STT → LLM → TTS habitual. «Grok Realtime» conversa directamente con Grok por voz (speech-to-speech) con sus voces nativas — requiere conexión y un build nativo (dev-client) en iOS.
-          </Text>
-
-          <View style={styles.optionsRow}>
-            {([
-              { id: 'pipeline', label: 'Pipeline (STT→LLM→TTS)' },
-              { id: 'grok', label: 'Grok Realtime' },
-            ] as const).map((mode) => (
-              <TouchableOpacity
-                key={mode.id}
-                style={[styles.optionChip, settings.voiceMode === mode.id && styles.optionChipActive]}
-                onPress={() => updateSettings({ voiceMode: mode.id })}
-              >
-                <Text style={[styles.optionText, settings.voiceMode === mode.id && styles.optionTextActive]}>
-                  {mode.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {settings.voiceMode === 'grok' ? (
-            <>
-              <Text style={styles.subsectionTitle}>Voz de Grok</Text>
-              <View style={styles.optionsRow}>
-                {GROK_VOICES.map((voice) => (
-                  <TouchableOpacity
-                    key={voice.id}
-                    style={[styles.optionChip, settings.grokVoiceId === voice.id && styles.optionChipActive]}
-                    onPress={() => updateSettings({ grokVoiceId: voice.id })}
-                  >
-                    <Text style={[styles.optionText, settings.grokVoiceId === voice.id && styles.optionTextActive]}>
-                      {voice.name}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              <Text style={styles.hintText}>
-                Voces nativas de xAI. Español (es-ES) soportado. La key de Grok vive en el servidor proxy — no se necesita ninguna key en el móvil.
-              </Text>
-            </>
-          ) : null}
-          </>
-        ), settings.voiceMode === 'grok' ? `Grok · ${settings.grokVoiceId}` : 'Pipeline')}
-
-        {renderSection('voice', 'Voz del Asistente', 'volume-high', () => (
-          <>
-          <Text style={styles.hintText}>
-            Las voces de cada proveedor solo sonarán diferentes si ese proveedor está disponible en web/iOS y tiene credenciales válidas. En iPhone, las voces reales del sistema son las más fiables.
-          </Text>
-
-          {settings.ttsProvider === 'kokoro' ? (
-            <View style={[styles.statusPanel, { borderColor: `${COLORS.success}40` }]}>
-              <Text style={[styles.statusPanelLabel, { color: COLORS.success }]}>⚡ MODO BAJO COSTE / SUB-SEGUNDO</Text>
-              <Text style={styles.statusPanelValue}>
-                Kokoro streaming + ring buffer nativo. Solapa generación, síntesis y reproducción para mínima latencia a coste marginal ~0. Recomienda el preset «Ultra-rápido» y un dev-client nativo en iOS.
-              </Text>
+            <View style={styles.buttonRow}>
+              <Button
+                label="Comprobar"
+                icon="shield-check-outline"
+                compact
+                onPress={handleCheckProxyAuth}
+                loading={checkingProxyAuth}
+                style={styles.flex}
+              />
+              <Button
+                label="Desvincular"
+                icon="cellphone-remove"
+                variant="danger"
+                compact
+                onPress={handleRevokeProxyDevice}
+                loading={revokingProxyDevice}
+                style={styles.flex}
+              />
             </View>
-          ) : null}
+          </Section>
 
-          {voicesByProvider.map(({ provider, voices }) => {
-            const providerLabel = provider === 'native' ? 'Nativas'
-              : provider === 'server' ? 'Server neural'
-              : provider === 'kokoro' ? 'Kokoro (⚡ sub-segundo)'
-              : provider === 'openai' ? 'OpenAI'
-              : provider === 'elevenlabs' ? 'ElevenLabs'
-              : 'MiniMax';
-            return (
-              <View key={provider} style={{ marginBottom: 8 }}>
-                <Text style={styles.voiceGroupLabel}>{providerLabel}</Text>
-                <View style={styles.optionsRow}>
-                  {voices.map((voice) => (
-                    <View key={voice.id} style={styles.voiceChipRow}>
-                      <TouchableOpacity
-                        style={[styles.optionChip, settings.ttsVoice === voice.id && styles.optionChipActive]}
-                        onPress={() => updateSettings({
-                          ttsProvider: provider,
-                          ttsVoice: voice.id,
-                          ttsNativeVoiceId: provider === 'native' && !voice.id.startsWith('native-')
-                            ? voice.id
-                            : settings.ttsNativeVoiceId,
-                          ttsLanguage: voice.language === 'multi' ? settings.ttsLanguage : voice.language,
-                        })}
-                      >
-                        <Text style={[styles.optionText, settings.ttsVoice === voice.id && styles.optionTextActive]}>
-                          {voice.name}
-                        </Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        onPress={() => handlePlayVoiceDemo(voice)}
-                        disabled={playingVoice !== null}
-                        style={styles.voiceDemoButton}
-                      >
-                        <Icon
-                          name={playingVoice === voice.id ? 'loading' : 'play-circle-outline'}
-                          size={22}
-                          color={playingVoice === voice.id ? COLORS.accent : COLORS.textSecondary}
-                        />
-                      </TouchableOpacity>
-                    </View>
-                  ))}
+          {/* ── API keys ── */}
+          <Section
+            title="Claves de API"
+            subtitle="Solo para proveedores directos"
+            icon="key-variant"
+            expanded={expanded === 'api'}
+            onToggle={() => toggleSection('api')}
+          >
+            <View style={styles.keysHeader}>
+              <Hint style={styles.flex}>
+                Normalmente no hacen falta: el proxy guarda las claves en el servidor. Se almacenan cifradas en el llavero del iPhone. Deja el campo vacío y guarda para borrar una clave.
+              </Hint>
+              <IconButton
+                icon={showKeys ? 'eye-off-outline' : 'eye-outline'}
+                label={showKeys ? 'Ocultar claves' : 'Mostrar claves'}
+                onPress={() => setShowKeys(!showKeys)}
+                color={COLORS.primary}
+                filled
+              />
+            </View>
+            {API_KEY_FIELDS.map(({ provider, label, placeholder }) => (
+              <View key={provider} style={styles.keyRow}>
+                <Text style={styles.keyLabel}>{label}</Text>
+                <View style={styles.inlineInputRow}>
+                  <TextInput
+                    style={[styles.input, styles.flex, { fontFamily: MONO_FONT, fontSize: 13 }]}
+                    value={apiKeys[provider] ?? ''}
+                    onChangeText={(text) => setApiKeys((keys) => ({ ...keys, [provider]: text }))}
+                    placeholder={placeholder}
+                    placeholderTextColor={COLORS.textMuted}
+                    secureTextEntry={!showKeys}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    accessibilityLabel={`Clave de ${label}`}
+                  />
+                  <IconButton
+                    icon="content-save-outline"
+                    label={`Guardar clave de ${label}`}
+                    onPress={() => saveKey(provider, label)}
+                    color={COLORS.primary}
+                    filled
+                    style={styles.keySave}
+                  />
                 </View>
               </View>
-            );
-          })}
-
-          {nativeVoices.length > 0 ? (
-            <Text style={styles.hintText}>
-              Detectadas {nativeVoices.length} voces reales del sistema. La app prioriza voces mejoradas/premium cuando no eliges una concreta.
-            </Text>
-          ) : null}
-          </>
-        ), `${settings.ttsProvider}/${settings.ttsVoice}`)}
-
-        {renderSection('performance', 'Rendimiento y Naturalidad', 'speedometer', () => (
-          <>
-          <Text style={styles.hintText}>
-            "Ultra-rápido" reduce espera y longitud de respuesta. "Natural" deja más aire y una voz más calmada.
-          </Text>
-
-          <Text style={styles.subsectionTitle}>Modo de respuesta</Text>
-          <View style={styles.optionsRow}>
-            {RESPONSE_STYLE_PRESETS.map((preset) => (
-              <TouchableOpacity
-                key={preset.id}
-                style={[
-                  styles.optionChip,
-                  settings.responseStyle === preset.id && styles.optionChipActive,
-                ]}
-                onPress={() => applyResponseStylePreset(preset.id)}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.responseStyle === preset.id && styles.optionTextActive,
-                ]}>
-                  {preset.name}
-                </Text>
-              </TouchableOpacity>
             ))}
-          </View>
+          </Section>
 
-          <Text style={styles.subsectionTitle}>Workflow KAIRO</Text>
-          <View style={styles.optionsRow}>
-            {BOOLEAN_OPTIONS.map((enabled) => (
-              <TouchableOpacity
-                key={`continuous-${String(enabled)}`}
-                style={[
-                  styles.optionChip,
-                  settings.continuousConversation === enabled && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ continuousConversation: enabled })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.continuousConversation === enabled && styles.optionTextActive,
-                ]}>
-                  {enabled ? 'Conversacion continua' : 'Solo KAIRO'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            {BOOLEAN_OPTIONS.map((enabled) => (
-              <TouchableOpacity
-                key={`interrupt-${String(enabled)}`}
-                style={[
-                  styles.optionChip,
-                  settings.interruptSpeechWithButton === enabled && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ interruptSpeechWithButton: enabled })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.interruptSpeechWithButton === enabled && styles.optionTextActive,
-                ]}>
-                  {enabled ? 'Barge-in boton' : 'No interrumpir'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            {BOOLEAN_OPTIONS.map((enabled) => (
-              <TouchableOpacity
-                key={`wake-interrupt-${String(enabled)}`}
-                style={[
-                  styles.optionChip,
-                  settings.interruptSpeechWithWakeWord === enabled && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ interruptSpeechWithWakeWord: enabled })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.interruptSpeechWithWakeWord === enabled && styles.optionTextActive,
-                ]}>
-                  {enabled ? 'Barge-in voz' : 'Wake no corta'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          {/* ── Diagnostics ── */}
+          <Section
+            title="Diagnóstico"
+            subtitle={`${logCount} registros`}
+            icon="stethoscope"
+            expanded={expanded === 'diagnostics'}
+            onToggle={() => toggleSection('diagnostics')}
+          >
+            <View style={styles.buttonRow}>
+              <Button
+                label="Estado de Hermes"
+                icon="server-network"
+                compact
+                onPress={handleCheckHermes}
+                loading={checkingHermes}
+                style={styles.flex}
+              />
+              <Button
+                label={`Ver logs (${logCount})`}
+                icon="text-box-search-outline"
+                compact
+                onPress={() => setLogModalVisible(true)}
+                style={styles.flex}
+              />
+            </View>
+            <Card style={styles.statusCard} padded>
+              <Text style={styles.statusLabel}>HERMES</Text>
+              <Text style={styles.statusValue}>{hermesSummary}</Text>
+            </Card>
+            {Platform.OS === 'web' ? (
+              <ToggleRow
+                title="Guardar audio de STT"
+                subtitle="Graba lo que oye el reconocimiento (solo web, diagnóstico)"
+                icon="record-rec"
+                value={settings.speechDebugAudioEnabled}
+                onValueChange={(value) => updateSettings({ speechDebugAudioEnabled: value })}
+              />
+            ) : null}
+            <Hint style={styles.hintBelow}>
+              La pestaña Debug tiene pruebas de micrófono, voz, Bluetooth y botones de las gafas.
+            </Hint>
+          </Section>
 
-          <Text style={styles.subsectionTitle}>Respuesta en directo</Text>
-          <View style={styles.optionsRow}>
-            {BOOLEAN_OPTIONS.map((enabled) => (
-              <TouchableOpacity
-                key={`streaming-${String(enabled)}`}
-                style={[
-                  styles.optionChip,
-                  settings.streamingEnabled === enabled && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ streamingEnabled: enabled })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.streamingEnabled === enabled && styles.optionTextActive,
-                ]}>
-                  {enabled ? 'Streaming LLM' : 'Completa'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-            {BOOLEAN_OPTIONS.map((enabled) => (
-              <TouchableOpacity
-                key={`chunked-tts-${String(enabled)}`}
-                style={[
-                  styles.optionChip,
-                  settings.ttsChunkedPlaybackEnabled === enabled && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ ttsChunkedPlaybackEnabled: enabled })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.ttsChunkedPlaybackEnabled === enabled && styles.optionTextActive,
-                ]}>
-                  {enabled ? 'Voz por frases' : 'Voz al final'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.subsectionTitle}>Corte de escucha</Text>
-          <View style={styles.optionsRow}>
-            {LISTENING_PRESETS.map((preset) => (
-              <TouchableOpacity
-                key={preset.label}
-                style={[
-                  styles.optionChip,
-                  settings.silenceThresholdMs === preset.silence && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({
-                  silenceThresholdMs: preset.silence,
-                  finalSilenceThresholdMs: preset.final,
-                  sttStopTimeoutMs: preset.stop,
-                })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.silenceThresholdMs === preset.silence && styles.optionTextActive,
-                ]}>
-                  {preset.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.subsectionTitle}>Timeout LLM</Text>
-          <View style={styles.optionsRow}>
-            {LLM_TIMEOUTS.map((timeout) => (
-              <TouchableOpacity
-                key={timeout}
-                style={[
-                  styles.optionChip,
-                  settings.llmRequestTimeoutMs === timeout && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ llmRequestTimeoutMs: timeout })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.llmRequestTimeoutMs === timeout && styles.optionTextActive,
-                ]}>
-                  {`${timeout / 1000}s`}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.subsectionTitle}>Velocidad de voz</Text>
-          <View style={styles.optionsRow}>
-            {TTS_RATES.map((rate) => (
-              <TouchableOpacity
-                key={rate}
-                style={[
-                  styles.optionChip,
-                  Math.abs(settings.ttsRate - rate) < 0.01 && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ ttsRate: rate })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  Math.abs(settings.ttsRate - rate) < 0.01 && styles.optionTextActive,
-                ]}>
-                  {rate < 1 ? 'Suave' : rate < 1.15 ? 'Ágil' : 'Rápida'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.subsectionTitle}>Tono</Text>
-          <View style={styles.optionsRow}>
-            {TTS_PITCHES.map((pitch) => (
-              <TouchableOpacity
-                key={pitch}
-                style={[
-                  styles.optionChip,
-                  Math.abs(settings.ttsPitch - pitch) < 0.01 && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ ttsPitch: pitch })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  Math.abs(settings.ttsPitch - pitch) < 0.01 && styles.optionTextActive,
-                ]}>
-                  {pitch < 1 ? 'Grave' : pitch > 1 ? 'Brillante' : 'Neutro'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          </>
-        ), settings.responseStyle)}
-
-        {renderSection('personality', 'Estilo de KAIRO', 'account-voice', () => (
-          <>
-          <Text style={styles.hintText}>
-            Elige cómo responde KAIRO. El nombre visible de la IA es siempre la palabra de activación activa.
-          </Text>
-          <View style={styles.optionsRow}>
-            {PERSONALITY_PRESETS.map((p) => (
-              <TouchableOpacity
-                key={p.id}
-                style={[
-                  styles.personalityCard,
-                  settings.personalityId === p.id && styles.personalityCardActive,
-                ]}
-                onPress={() => updateSettings({ personalityId: p.id, systemPrompt: p.systemPromptPrefix })}
-              >
-                <Icon
-                  name={p.icon as any}
-                  size={22}
-                  color={settings.personalityId === p.id ? COLORS.primary : COLORS.textSecondary}
-                />
-                <Text style={[
-                  styles.personalityName,
-                  settings.personalityId === p.id && { color: COLORS.primary },
-                ]}>{p.name}</Text>
-                <Text style={styles.personalityDesc}>{p.description}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          </>
-        ), settings.personalityId)}
-
-        {renderSection('prompt', 'System Prompt', 'script-text-outline', () => (
-          <TextInput
-            style={styles.promptInput}
-            value={settings.systemPrompt}
-            onChangeText={(text) => updateSettings({ systemPrompt: text })}
-            multiline
-            numberOfLines={4}
-            placeholderTextColor={COLORS.textSecondary}
-            placeholder="Instrucciones del sistema..."
+          <Button
+            label="Restablecer ajustes por defecto"
+            icon="restore"
+            variant="ghost"
+            onPress={handleResetSettings}
+            style={styles.resetButton}
           />
-        ), 'Instrucciones base')}
-
-        {renderSection('wake', 'Nombre y activación', 'microphone-outline', () => (
-          <>
-          <Text style={styles.hintText}>
-            Esta palabra es el nombre visible de la IA y la frase para activarla por voz. El valor estable actual es KAIRO.
-          </Text>
-          <View style={styles.optionsRow}>
-            {WAKE_WORD_PRESETS.map((preset) => {
-              const isCustom = preset.id === 'custom';
-              const isSelected = isCustom
-                ? !WAKE_WORD_PRESETS.some(p => p.id !== 'custom' && p.phrase.toLowerCase() === settings.wakeWord.toLowerCase())
-                : preset.phrase.toLowerCase() === settings.wakeWord.toLowerCase();
-              return (
-                <TouchableOpacity
-                  key={preset.id}
-                  style={[styles.optionChip, isSelected && styles.optionChipActive]}
-                  onPress={() => {
-                    if (!isCustom) {
-                      updateSettings({ wakeWord: preset.phrase, wakeWordLang: preset.lang });
-                    } else {
-                      updateSettings({ wakeWordLang: 'es-ES' });
-                    }
-                  }}
-                >
-                  <Text style={[styles.optionText, isSelected && styles.optionTextActive]}>
-                    {preset.label}
-                  </Text>
-                  {!isCustom && <Text style={styles.langHint}>{preset.lang === 'es-ES' ? '🇪🇸' : '🇬🇧'}</Text>}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-          {!WAKE_WORD_PRESETS.some(p => p.id !== 'custom' && p.phrase.toLowerCase() === settings.wakeWord.toLowerCase()) && (
-            <TextInput
-              style={[styles.wakeWordInput, { marginTop: 8 }]}
-              value={settings.wakeWord}
-              onChangeText={(text) => updateSettings({ wakeWord: text })}
-              placeholder="Tu frase personalizada..."
-              placeholderTextColor={COLORS.textSecondary}
-              autoCapitalize="sentences"
-            />
-          )}
-
-          <Text style={styles.subsectionTitle}>Rearme de KAIRO</Text>
-          <View style={styles.optionsRow}>
-            {WAKE_REARM_PRESETS.map((preset) => (
-              <TouchableOpacity
-                key={preset.label}
-                style={[
-                  styles.optionChip,
-                  settings.wakeWordResumeDelayMs === preset.resume && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({
-                  wakeWordResumeDelayMs: preset.resume,
-                  wakeWordCooldownMs: preset.cooldown,
-                  wakeWordMinTriggerIntervalMs: preset.trigger,
-                })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.wakeWordResumeDelayMs === preset.resume && styles.optionTextActive,
-                ]}>
-                  {preset.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          </>
-        ), `"${settings.wakeWord}"`)}
-
-        {renderSection('bluetooth', 'Bluetooth', 'bluetooth-connect', () => (
-          <>
-          <Text style={styles.hintText}>
-            Activa la reconexión automática para que la app intente volver a enlazar con las gafas nada más abrirse.
-          </Text>
-
-          <Text style={styles.subsectionTitle}>Reconexión automática</Text>
-          <View style={styles.optionsRow}>
-            {BOOLEAN_OPTIONS.map((enabled) => (
-              <TouchableOpacity
-                key={String(enabled)}
-                style={[
-                  styles.optionChip,
-                  settings.autoConnectBluetooth === enabled && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ autoConnectBluetooth: enabled })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.autoConnectBluetooth === enabled && styles.optionTextActive,
-                ]}>
-                  {enabled ? 'Activada' : 'Desactivada'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.subsectionTitle}>Búsqueda corta al abrir</Text>
-          <View style={styles.optionsRow}>
-            {BOOLEAN_OPTIONS.map((enabled) => (
-              <TouchableOpacity
-                key={`scan-${String(enabled)}`}
-                style={[
-                  styles.optionChip,
-                  settings.autoScanBluetoothOnLaunch === enabled && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ autoScanBluetoothOnLaunch: enabled })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.autoScanBluetoothOnLaunch === enabled && styles.optionTextActive,
-                ]}>
-                  {enabled ? 'Sí' : 'No'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.subsectionTitle}>Duración del auto-scan</Text>
-          <View style={styles.optionsRow}>
-            {BLUETOOTH_SCAN_DURATIONS.map((duration) => (
-              <TouchableOpacity
-                key={duration}
-                style={[
-                  styles.optionChip,
-                  settings.bluetoothAutoScanDurationMs === duration && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ bluetoothAutoScanDurationMs: duration })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.bluetoothAutoScanDurationMs === duration && styles.optionTextActive,
-                ]}>
-                  {`${(duration / 1000).toFixed(1)}s`}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.subsectionTitle}>Vigilancia con app abierta</Text>
-          <View style={styles.optionsRow}>
-            {BLUETOOTH_RECONNECT_INTERVALS.map((intervalMs) => (
-              <TouchableOpacity
-                key={intervalMs}
-                style={[
-                  styles.optionChip,
-                  settings.bluetoothAutoReconnectIntervalMs === intervalMs && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ bluetoothAutoReconnectIntervalMs: intervalMs })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.bluetoothAutoReconnectIntervalMs === intervalMs && styles.optionTextActive,
-                ]}>
-                  {`${(intervalMs / 1000).toFixed(0)}s`}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          </>
-        ), settings.autoConnectBluetooth ? 'Auto-connect activo' : 'Manual')}
-
-        {renderSection('diagnostics', 'Diagnósticos', 'stethoscope', () => (
-          <>
-          <TouchableOpacity
-            style={styles.diagButton}
-            onPress={handleTestPipeline}
-            disabled={testingPipeline}
-          >
-            <Icon name="flask-outline" size={20} color={COLORS.primary} />
-            <Text style={styles.diagButtonText}>
-              {testingPipeline ? 'Probando...' : 'Probar Pipeline (LLM)'}
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.diagButton}
-            onPress={handleCheckHermes}
-            disabled={checkingHermes}
-          >
-            <Icon name="server-network" size={20} color={COLORS.primary} />
-            <Text style={styles.diagButtonText}>
-              {checkingHermes ? 'Comprobando Hermes...' : 'Estado Hermes'}
-            </Text>
-          </TouchableOpacity>
-
-          <View style={styles.statusPanel}>
-            <Text style={styles.statusPanelLabel}>Hermes</Text>
-            <Text style={styles.statusPanelValue}>{hermesSummary}</Text>
-          </View>
-
-          <TouchableOpacity
-            style={styles.diagButton}
-            onPress={openLogModal}
-          >
-            <Icon name="text-box-outline" size={20} color={COLORS.primary} />
-            <Text style={styles.diagButtonText}>Ver Logs ({logCount})</Text>
-          </TouchableOpacity>
-
-          <Text style={styles.subsectionTitle}>Guardar audio STT</Text>
-          <View style={styles.optionsRow}>
-            {BOOLEAN_OPTIONS.map((enabled) => (
-              <TouchableOpacity
-                key={`speech-debug-${String(enabled)}`}
-                style={[
-                  styles.optionChip,
-                  settings.speechDebugAudioEnabled === enabled && styles.optionChipActive,
-                ]}
-                onPress={() => updateSettings({ speechDebugAudioEnabled: enabled })}
-              >
-                <Text style={[
-                  styles.optionText,
-                  settings.speechDebugAudioEnabled === enabled && styles.optionTextActive,
-                ]}>
-                  {enabled ? 'Sí' : 'No'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <Text style={styles.hintText}>
-            Proveedor: {settings.llmProvider} · Modelo: {settings.llmModel} · IA/Wake word: {settings.wakeWord}
-          </Text>
-          </>
-        ), `${logCount} logs`)}
-      </ScrollView>
+          <Text style={styles.footer}>KAIRO · SmartGlasses AI</Text>
+        </ScrollView>
+      </KeyboardAvoidingView>
 
       {/* Log Viewer Modal */}
-      <Modal visible={logModalVisible} animationType="slide" presentationStyle="pageSheet">
+      <Modal
+        visible={logModalVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setLogModalVisible(false)}
+      >
         <SafeAreaView style={styles.modalContainer}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Logs ({logs.length})</Text>
+            <Text style={styles.modalTitle}>Logs</Text>
             <View style={styles.modalActions}>
-              <TouchableOpacity onPress={handleExportLogs}>
-                <Icon name="share-variant" size={22} color={COLORS.primary} />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={handleClearLogs}>
-                <Icon name="delete-outline" size={22} color={COLORS.error} />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => setLogModalVisible(false)}>
-                <Icon name="close" size={24} color={COLORS.text} />
-              </TouchableOpacity>
+              <IconButton icon="share-variant" label="Exportar logs" onPress={handleExportLogs} color={COLORS.primary} />
+              <IconButton icon="delete-outline" label="Borrar logs" onPress={handleClearLogs} color={COLORS.error} />
+              <IconButton icon="close" label="Cerrar" onPress={() => setLogModalVisible(false)} color={COLORS.text} />
             </View>
           </View>
-
+          <View style={styles.logFilters}>
+            {(['all', 'error', 'warn', 'info', 'debug'] as const).map((level) => (
+              <Pill
+                key={level}
+                label={level === 'all' ? `Todos · ${logs.length}` : level.toUpperCase()}
+                color={logFilter === level ? (level === 'all' ? COLORS.primary : LOG_COLORS[level]) : COLORS.textMuted}
+                onPress={() => setLogFilter(level)}
+              />
+            ))}
+          </View>
           <FlatList
-            data={logs}
-            keyExtractor={keyLogEntry}
+            data={filteredLogs}
+            keyExtractor={(item) => item.id}
             renderItem={renderLogEntry}
             initialNumToRender={30}
             maxToRenderPerBatch={30}
             windowSize={7}
-            contentContainerStyle={{ padding: 12 }}
-            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ padding: SPACING.md }}
+            ListEmptyComponent={<Hint style={{ textAlign: 'center', marginTop: SPACING.lg }}>No hay registros.</Hint>}
           />
         </SafeAreaView>
       </Modal>
@@ -1245,349 +1126,136 @@ export const SettingsScreen: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  content: {
-    padding: 16,
-    paddingBottom: 40,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  consoleHeader: {
-    backgroundColor: COLORS.card,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: `${COLORS.primary}30`,
-  },
-  headerTitleRow: {
+  container: { flex: 1, backgroundColor: COLORS.background },
+  flex: { flex: 1 },
+  content: { paddingHorizontal: SPACING.md, paddingBottom: SPACING.xxl },
+  overview: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
+    alignItems: 'stretch',
+    marginBottom: SPACING.md,
+    paddingVertical: 14,
+    paddingHorizontal: 8,
   },
-  headerSubtitle: {
-    fontSize: 11,
-    color: COLORS.textSecondary,
-    marginTop: 2,
-  },
-  headerMetrics: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 12,
-  },
-  metricPill: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  metricLabel: {
-    fontSize: 9,
-    color: COLORS.textMuted,
-    fontWeight: '800',
-    letterSpacing: 0.5,
-  },
-  metricValue: {
-    fontSize: 12,
-    color: COLORS.primary,
-    fontWeight: '800',
-    marginTop: 2,
-  },
+  overviewItem: { flex: 1, alignItems: 'center', gap: 4, paddingHorizontal: 4 },
+  overviewDivider: { width: StyleSheet.hairlineWidth, backgroundColor: COLORS.border },
+  overviewLabel: { fontSize: 10, fontWeight: '800', color: COLORS.textMuted, letterSpacing: 0.6, textTransform: 'uppercase' },
+  overviewValue: { fontSize: 13, fontWeight: '700', color: COLORS.text },
   section: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 12,
-    marginBottom: 16,
+    backgroundColor: COLORS.card,
+    borderRadius: RADIUS.lg,
     borderWidth: 1,
     borderColor: COLORS.border,
+    marginBottom: 10,
     overflow: 'hidden',
   },
-  collapsibleHeader: {
-    minHeight: 58,
+  sectionExpanded: { borderColor: withAlpha(COLORS.primary, 0.35) },
+  sectionHeader: {
+    minHeight: 64,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
   },
-  collapsibleTitleRow: {
-    flex: 1,
-    flexDirection: 'row',
+  sectionIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 11,
     alignItems: 'center',
-    gap: 10,
+    justifyContent: 'center',
+    backgroundColor: COLORS.surfaceLight,
   },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: COLORS.text },
+  sectionSubtitle: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
   sectionBody: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingBottom: 16,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
   },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  sectionSubtitle: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    marginTop: 2,
-  },
-  inlineSectionAction: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 12,
-    marginBottom: 8,
-  },
-  iconOnlyButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.background,
+  firstLabel: { marginTop: 14 },
+  firstHint: { marginTop: 14 },
+  hintBelow: { marginTop: 8 },
+  divider: { marginTop: SPACING.md },
+  sectionButton: { marginTop: SPACING.md },
+  cardGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  choiceCard: {
+    width: '48.5%',
+    flexGrow: 1,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.md,
+    padding: 12,
     borderWidth: 1,
     borderColor: COLORS.border,
+    gap: 4,
   },
-  keyRow: {
-    marginBottom: 12,
-  },
-  keyLabel: {
-    fontSize: 13,
-    color: COLORS.textSecondary,
-    marginBottom: 4,
-    fontWeight: '500',
-  },
-  keyInputRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  keyInput: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-    borderRadius: 8,
+  choiceCardActive: { borderColor: COLORS.primary, backgroundColor: withAlpha(COLORS.primary, 0.1) },
+  choiceTitle: { fontSize: 14, fontWeight: '800', color: COLORS.text, marginTop: 4 },
+  choiceDesc: { fontSize: 12, color: COLORS.textSecondary, lineHeight: 16 },
+  inlineInputRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 },
+  input: {
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.border,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 11,
     color: COLORS.text,
-    fontSize: 14,
+    fontSize: 15,
   },
-  saveButton: {
-    backgroundColor: COLORS.background,
-    borderRadius: 8,
-    padding: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pickerContainer: {
-    backgroundColor: COLORS.background,
-    borderRadius: 8,
+  promptInput: { minHeight: 140, textAlignVertical: 'top', marginTop: 14, lineHeight: 20 },
+  buttonRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  voiceList: {
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.border,
     overflow: 'hidden',
   },
-  picker: {
-    color: COLORS.text,
-  },
-  optionsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  subsectionTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginTop: 12,
-    marginBottom: 8,
-  },
-  optionChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: COLORS.background,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  optionChipActive: {
-    borderColor: COLORS.primary,
-    backgroundColor: `${COLORS.primary}20`,
-  },
-  optionText: {
-    fontSize: 13,
-    color: COLORS.textSecondary,
-    fontWeight: '500',
-  },
-  optionTextActive: {
-    color: COLORS.primary,
-    fontWeight: '700',
-  },
-  promptInput: {
-    backgroundColor: COLORS.background,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: COLORS.text,
-    fontSize: 14,
-    minHeight: 100,
-    textAlignVertical: 'top',
-  },
-  hintText: {
-    fontSize: 12,
-    color: COLORS.textSecondary,
-    marginBottom: 8,
-    lineHeight: 16,
-  },
-  wakeWordInput: {
-    backgroundColor: COLORS.background,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: COLORS.text,
-    fontSize: 14,
-  },
-  voiceGroupLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.textSecondary,
-    marginBottom: 4,
-    marginTop: 4,
-  },
-  langHint: {
-    fontSize: 10,
-    marginLeft: 2,
-  },
-  voiceChipRow: {
+  voiceRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    paddingRight: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
   },
-  voiceDemoButton: {
-    padding: 4,
-  },
-  personalityCard: {
-    width: '47%',
-    backgroundColor: COLORS.background,
-    borderRadius: 10,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    gap: 4,
-  },
-  personalityCardActive: {
-    borderColor: COLORS.primary,
-    backgroundColor: `${COLORS.primary}10`,
-  },
-  personalityName: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.textSecondary,
-    marginTop: 2,
-  },
-  personalityDesc: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    lineHeight: 14,
-  },
-  diagButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: COLORS.background,
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 8,
-  },
-  diagButtonText: {
-    fontSize: 14,
-    color: COLORS.text,
-    fontWeight: '500',
-  },
-  statusPanel: {
-    backgroundColor: COLORS.background,
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  statusPanelLabel: {
-    fontSize: 10,
-    color: COLORS.textMuted,
-    fontWeight: '800',
-    marginBottom: 4,
-  },
-  statusPanelValue: {
-    fontSize: 13,
-    color: COLORS.text,
-    lineHeight: 18,
-  },
+  voiceRowActive: { backgroundColor: withAlpha(COLORS.primary, 0.08) },
+  voiceSelect: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 12 },
+  voiceName: { flex: 1, fontSize: 14, color: COLORS.text, fontWeight: '600' },
+  noteCard: { marginTop: 12, gap: 4 },
+  noteTitle: { fontSize: 13, fontWeight: '800', color: COLORS.success },
+  statusCard: { marginTop: 12, backgroundColor: COLORS.surface },
+  statusLabel: { fontSize: 10, fontWeight: '800', color: COLORS.textMuted, letterSpacing: 0.8, marginBottom: 4 },
+  statusValue: { fontSize: 13, color: COLORS.text, lineHeight: 18 },
+  keysHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginTop: 14, marginBottom: 4 },
+  keyRow: { marginTop: 10 },
+  keyLabel: { fontSize: 13, fontWeight: '700', color: COLORS.textSecondary },
+  keySave: { width: 46, height: 46 },
+  resetButton: { marginTop: SPACING.md },
+  footer: { textAlign: 'center', color: COLORS.textMuted, fontSize: 12, marginTop: 4 },
   // Log viewer modal
-  modalContainer: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
+  modalContainer: { flex: 1, backgroundColor: COLORS.background },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  modalActions: {
-    flexDirection: 'row',
-    gap: 16,
-    alignItems: 'center',
-  },
-  logEntry: {
-    marginBottom: 6,
-    paddingBottom: 6,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
-  logMeta: {
-    flexDirection: 'row',
-    gap: 6,
-    alignItems: 'center',
-    marginBottom: 2,
+  modalTitle: { fontSize: 20, fontWeight: '800', color: COLORS.text },
+  modalActions: { flexDirection: 'row', gap: 4, alignItems: 'center' },
+  logFilters: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingHorizontal: SPACING.md, paddingTop: 10 },
+  logEntry: {
+    marginBottom: 8,
+    paddingBottom: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
   },
-  logLevel: {
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: 'Courier',
-  },
-  logTag: {
-    fontSize: 10,
-    color: COLORS.textSecondary,
-    fontFamily: 'Courier',
-  },
-  logTime: {
-    fontSize: 10,
-    color: COLORS.textSecondary,
-    marginLeft: 'auto',
-  },
-  logMessage: {
-    fontSize: 12,
-    color: COLORS.text,
-    lineHeight: 16,
-  },
+  logMeta: { flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 3 },
+  logLevel: { fontSize: 10, fontWeight: '800', fontFamily: MONO_FONT },
+  logTag: { fontSize: 10, color: COLORS.textSecondary, fontFamily: MONO_FONT },
+  logTime: { fontSize: 10, color: COLORS.textMuted, marginLeft: 'auto', fontFamily: MONO_FONT },
+  logMessage: { fontSize: 12, color: COLORS.text, lineHeight: 17, fontFamily: MONO_FONT },
 });

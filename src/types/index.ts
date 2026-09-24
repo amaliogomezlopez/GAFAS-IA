@@ -122,4 +122,6 @@ export interface AppSettings {
   bluetoothAutoScanDurationMs: number;
   bluetoothAutoReconnectIntervalMs: number;
   speechDebugAudioEnabled: boolean;
+  /** Schema version used by the one-shot settings migrations in the store. */
+  settingsVersion: number;
 }

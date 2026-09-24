@@ -10,7 +10,7 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#0F0F1A"
+      "backgroundColor": "#05080F"
     },
     "ios": {
       "supportsTablet": false,
@@ -31,7 +31,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#0F0F1A"
+        "backgroundColor": "#05080F"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
@@ -65,6 +65,7 @@
       "eas": {
         "projectId": "3bdf1066-dabb-47db-a9e4-ddda888b9e9b"
       }
-    }
+    },
+    "backgroundColor": "#05080F"
   }
 }

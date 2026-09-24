@@ -1,5 +1,48 @@
 # Changelog
 
+## [Unreleased] — Pasada de pulido (bugs + diseño)
+
+### Fixed — Voz y pipeline
+- **Wake word dejaba de responder** tras el primer turno: el temporizador de `resume()` no se limpiaba y bloqueaba todos los reinicios posteriores del reconocedor.
+- **Frase de activación vacía** (p. ej. solo espacios) activaba el asistente con cualquier sonido; ahora se ignora.
+- **Carreras al interrumpir**: un turno antiguo podía poner el estado en `idle` encima del nuevo, o arrancar el STT tras un "Parar" durante el retardo de 650 ms de iOS.
+- **Timeout del LLM cortaba la voz** a mitad de frase; ahora solo aborta si el modelo no ha empezado a hablar (con una prórroga).
+- **Reproducción de audio colgada** para siempre al interrumpir (`stopPlayback` no resolvía la promesa) o si el archivo no cargaba; los MP3 temporales de TTS ya se borran.
+- **Kokoro streaming**: la última frase se cortaba (se cerraba la sesión antes de vaciar el buffer), un byte impar en un chunk de red desalineaba el PCM (ruido), y si Kokoro fallaba KAIRO quedaba mudo (ahora cae a la voz nativa). Si el LLM devolvía la respuesta sin streaming, no se hablaba nada.
+- **OpenCode**: un fallo a mitad de streaming repetía la petición y la respuesta hablada; una cancelación del usuario disparaba el fallback con clave directa.
+- **Markdown/emojis/URLs** ya no se leen en voz alta (`speechText.ts`) y el prompt pide respuestas aptas para voz.
+- **Contexto de conversación**: el modelo no recibía los turnos anteriores; ahora se envían los últimos 6 (excepto Hermes, que mantiene sesión propia).
+- **Modo Grok**: el wake word y el botón BLE seguían disparando el pipeline normal a la vez; un cierre inesperado del WebSocket dejaba la sesión "en directo" sin audio.
+
+### Fixed — Módulo nativo `expo-grok-audio`
+- Tras `clearPlayback`/`interrupt`/`stopPlaybackSession` el `AVAudioPlayerNode` quedaba parado y los turnos siguientes sonaban en silencio.
+- El límite de 2 s de audio encolado vaciaba el buffer en respuestas largas (Kokoro/Grok generan más rápido que tiempo real).
+- Posible interbloqueo entre `playerNode.stop()` y los completion handlers; contabilidad de frames por generación.
+- Nuevo `getBufferedDurationMs()` y evento `onPlaybackFinished` real. **Requiere recompilar la app nativa.**
+
+### Fixed — Estado, Bluetooth y datos
+- Las migraciones de ajustes se ejecutaban en **cada arranque** y deshacían elecciones del usuario (OpenCode + DeepSeek volvía a Hermes, timeouts < 90 s se subían). Ahora son de una sola vez (`settingsVersion`).
+- "Borrar todo" en Historial no borraba las conversaciones.
+- BLE: conexiones duplicadas (reconexión + vigilante), la reconexión ignoraba el ajuste del usuario y la batería no se actualizaba tras conectar. El hook ya no destruye el gestor BLE compartido al desmontarse.
+- Perfil: el formulario no se sincronizaba con el perfil cargado y la foto apuntaba a una caché temporal que iOS puede purgar.
+- Debug: las pruebas de micro/STT/TTS chocaban con el wake word; el "smoke test" arrancaba un turno real encima del TTS.
+
+### Fixed — Proxy (`server/server.py`)
+- JSON nulo/lista o parámetros no numéricos (`max_tokens`, `speed`) daban 500; ahora 400 con mensaje claro. Validación de `messages` también en MiniMax y OpenCode.
+- Presupuesto de rate-limit separado para TTS (`TTS_RATE_LIMIT`, 120/min) para que la voz por frases no agote el del chat; limpieza de buckets y lock.
+- Kokoro streaming comprueba dependencias antes de enviar cabeceras (503 en vez de audio vacío); carga del modelo protegida con lock.
+- Edge TTS valida `rate`/`volume` y no filtra excepciones al cliente.
+- Aviso al arrancar (también con gunicorn) si el proxy queda abierto sin `APP_TOKEN` ni auth por dispositivo.
+
+### Changed — Diseño
+- Nuevo kit de UI compartido (`src/components/ui.tsx`) y tokens (`RADIUS`, `withAlpha`, `MONO_FONT`, paleta refinada).
+- **Inicio**: cabecera limpia con estado y chip de gafas, reactor animado, sugerencias rápidas, chat con burbujas y hora (lista invertida), indicador de "pensando", barra de error descartable, compositor con micro de estados (enviar / interrumpir / parar) y botón de nueva conversación. Hoja de gafas con confirmación antes de desconectar.
+- **Historial**: búsqueda, vista previa, "Continuar" conversación en Inicio, compartir transcripción, fechas relativas.
+- **Ajustes**: secciones por prioridad (acordeón), interruptores en lugar de pares Sí/No, wake word personalizado que ahora funciona, prompt con guardar/descartar, filtros en el visor de logs, restablecer ajustes.
+- **Perfil**: iniciales como avatar, edad calculada, validación de fecha, estadísticas, scroll con teclado.
+- Barra de pestañas con alturas del safe area (antes fija a 85 px) e indicador en vivo en la pestaña KAIRO.
+- Mensajes de error HTTP comprensibles y aviso explícito si falta `EXPO_PUBLIC_PROXY_BASE_URL`.
+
 ## [Unreleased]
 
 ### Added — Modo de voz sub-segundo barato (OpenCode/Hermes + Kokoro streaming)

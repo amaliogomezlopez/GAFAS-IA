@@ -8,6 +8,7 @@ import { API_ENDPOINTS } from '../../constants';
 import type { TTSProvider, TTSVoice } from '../../types';
 import { AudioService } from '../audio';
 import { LogService } from '../LogService';
+import { sanitizeForSpeech } from './speechText';
 
 type TTSOptions = {
   language?: string;
@@ -28,7 +29,8 @@ export type StreamingSpeaker = {
 };
 
 const sanitizeError = (status: number, body: string): string => {
-  const sanitized = body.replace(/(?:sk-|Bearer\s+)[a-zA-Z0-9_-]{10,}/g, '[REDACTED]');
+  const cleaned = /<\s*(!doctype|html|head|body)/i.test(body) ? '' : body;
+  const sanitized = cleaned.replace(/(?:sk-|Bearer\s+)[a-zA-Z0-9_-]{10,}/g, '[REDACTED]');
   const truncated = sanitized.length > 200 ? sanitized.substring(0, 200) + '...' : sanitized;
   return `TTS error (${status}): ${truncated}`;
 };
@@ -162,6 +164,8 @@ export const TTSService = {
     voice: string = 'native-ios',
     options: TTSOptions = {},
   ): Promise<void> {
+    text = sanitizeForSpeech(text);
+    if (!text || options.signal?.aborted) return;
     LogService.info('TTS', `Synthesizing (${provider}/${voice}): "${text.substring(0, 60)}..."`);
 
     if (provider === 'native') {
@@ -172,11 +176,13 @@ export const TTSService = {
     if (provider === 'server') {
       try {
         const audioFilePath = await synthesizeServer(text, voice, options);
+        if (options.signal?.aborted) return;
         LogService.info('TTS', 'Audio file ready, starting playback...');
         await AudioService.playAudio(audioFilePath);
         LogService.info('TTS', 'TTS playback complete');
         return;
       } catch (error) {
+        if (options.signal?.aborted) return;
         LogService.warn('TTS', `Server TTS failed, falling back to native: ${error}`);
         await synthesizeNative(text, 'native-ios', options);
         return;
@@ -186,11 +192,13 @@ export const TTSService = {
     if (provider === 'kokoro') {
       try {
         const audioFilePath = await synthesizeKokoro(text, voice, options);
+        if (options.signal?.aborted) return;
         LogService.info('TTS', 'Kokoro audio ready, starting playback...');
         await AudioService.playAudio(audioFilePath);
         LogService.info('TTS', 'Kokoro playback complete');
         return;
       } catch (error) {
+        if (options.signal?.aborted) return;
         LogService.warn('TTS', `Kokoro failed, falling back to server/native: ${error}`);
         try {
           const audioFilePath = await synthesizeServer(text, 'es-ES-AlvaroNeural', options);
@@ -234,6 +242,7 @@ export const TTSService = {
         throw new Error(`TTS provider no soportado: ${provider}`);
     }
 
+    if (options.signal?.aborted) return;
     LogService.info('TTS', 'Audio file ready, starting playback...');
     await AudioService.playAudio(audioFilePath);
     LogService.info('TTS', 'TTS playback complete');

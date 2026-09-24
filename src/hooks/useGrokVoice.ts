@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect } from 'react';
 import { GrokVoice } from '../services/grok-voice';
 import { useAppStore } from '../stores';
 import type { AppState } from '../types';
@@ -13,25 +13,18 @@ import type { AppState } from '../types';
  * the wake-word service is intentionally NOT involved in Grok mode.
  */
 export function useGrokVoice() {
-  const {
-    setPipelineState,
-    setTranscription,
-    setResponse,
-    setError,
-    clearError,
-    addConversationEntry,
-    settings,
-    userProfile,
-  } = useAppStore();
-
-  const settingsRef = useRef(settings);
-  const userProfileRef = useRef(userProfile);
-  settingsRef.current = settings;
-  userProfileRef.current = userProfile;
+  const setPipelineState = useAppStore((s) => s.setPipelineState);
+  const setTranscription = useAppStore((s) => s.setTranscription);
+  const setResponse = useAppStore((s) => s.setResponse);
+  const setError = useAppStore((s) => s.setError);
+  const clearError = useAppStore((s) => s.clearError);
+  const addConversationEntry = useAppStore((s) => s.addConversationEntry);
+  const voiceMode = useAppStore((s) => s.settings.voiceMode);
 
   const startSession = useCallback(async () => {
     clearError();
-    await GrokVoice.startSession(settingsRef.current, userProfileRef.current, {
+    const { settings, userProfile } = useAppStore.getState();
+    await GrokVoice.startSession(settings, userProfile, {
       onStateChange: (grokState) => {
         // Map Grok session state → the AppState the rest of the UI already understands.
         const mapped: AppState =
@@ -77,10 +70,10 @@ export function useGrokVoice() {
   // Tear down any active Grok session if the user switches back to pipeline mode
   // or unmounts the Home screen.
   useEffect(() => {
-    if (settings.voiceMode !== 'grok' && GrokVoice.isActive()) {
+    if (voiceMode !== 'grok' && GrokVoice.isActive()) {
       GrokVoice.stopSession().then(() => setPipelineState('idle'));
     }
-  }, [settings.voiceMode, setPipelineState]);
+  }, [voiceMode, setPipelineState]);
 
   useEffect(() => {
     return () => {

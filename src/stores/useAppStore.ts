@@ -13,21 +13,30 @@ const PRE_HERMES_DEFAULT_MODELS = new Set(['deepseek-v4-flash']);
 const PRE_OPENCODE_GO_HERMES_MODELS = new Set(['hermes-agent']);
 const PRE_DEEPSEEK_FLASH_DEFAULT_MODELS = new Set(['kimi-k2.6']);
 
+/**
+ * Bump when a new one-shot settings migration is added. Migrations for older
+ * versions only run once, so later user choices (e.g. picking OpenCode or a
+ * shorter LLM timeout) are no longer overwritten on every launch.
+ */
+export const SETTINGS_SCHEMA_VERSION = 2;
+
+export type LatencyMetrics = { sttMs?: number; llmMs?: number; ttsMs?: number; totalMs?: number };
+
 interface StoreState {
   pipelineState: AppState;
   currentTranscription: string;
   interimTranscription: string;
   currentResponse: string;
   error: string | null;
-  conversationHistory: ConversationEntry[];
   chatSessions: ChatSession[];
   activeSessionId: string | null;
   settings: AppSettings;
+  settingsLoaded: boolean;
   isBluetoothConnected: boolean;
   bluetoothDeviceName: string | null;
   bluetoothBattery: number | null;
   userProfile: UserProfile;
-  latencyMetrics: { sttMs?: number; llmMs?: number; ttsMs?: number; totalMs?: number } | null;
+  latencyMetrics: LatencyMetrics | null;
   setPipelineState: (state: AppState) => void;
   setTranscription: (text: string) => void;
   setInterimTranscription: (text: string) => void;
@@ -37,13 +46,16 @@ interface StoreState {
   addConversationEntry: (entry: ConversationEntry) => void;
   clearHistory: () => void;
   updateSettings: (partial: Partial<AppSettings>) => void;
+  resetSettings: () => void;
   loadSettings: () => Promise<void>;
   setBluetoothStatus: (connected: boolean, deviceName?: string | null, battery?: number | null) => void;
   updateUserProfile: (partial: Partial<UserProfile>) => void;
   loadUserProfile: () => Promise<void>;
-  setLatencyMetrics: (metrics: { sttMs?: number; llmMs?: number; ttsMs?: number; totalMs?: number }) => void;
+  setLatencyMetrics: (metrics: LatencyMetrics) => void;
   // Session management
   createSession: (name?: string) => string;
+  /** Switch the Home chat to an existing session, or to a fresh one with `null`. */
+  setActiveSession: (sessionId: string | null) => void;
   renameSession: (sessionId: string, name: string) => void;
   deleteSession: (sessionId: string) => void;
   deleteEntry: (entryId: string) => void;
@@ -57,6 +69,84 @@ const DEFAULT_USER_PROFILE: UserProfile = {
   photoUri: null,
 };
 
+let idCounter = 0;
+function uniqueId(prefix: string): string {
+  idCounter = (idCounter + 1) % 1_000_000;
+  return `${prefix}_${Date.now()}_${idCounter}`;
+}
+
+function defaultSessionName(): string {
+  const now = new Date();
+  const date = now.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' });
+  const time = now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  return `Chat ${date} · ${time}`;
+}
+
+/** Applies the legacy (pre-versioned) migrations exactly once. */
+function migrateSettings(parsed: Partial<AppSettings>): { settings: AppSettings; changed: boolean } {
+  const merged: AppSettings = { ...DEFAULT_SETTINGS, ...parsed };
+  const storedVersion = typeof parsed.settingsVersion === 'number' ? parsed.settingsVersion : 0;
+  let changed = false;
+
+  if (storedVersion < 2) {
+    if (parsed.wakeWord && LEGACY_WAKE_WORDS.has(parsed.wakeWord.toLowerCase())) {
+      merged.wakeWord = DEFAULT_SETTINGS.wakeWord;
+      merged.wakeWordLang = DEFAULT_SETTINGS.wakeWordLang;
+    }
+    if (parsed.personalityId && LEGACY_PERSONALITY_IDS.has(parsed.personalityId.toLowerCase())) {
+      merged.personalityId = DEFAULT_SETTINGS.personalityId;
+      merged.systemPrompt = DEFAULT_SETTINGS.systemPrompt;
+    }
+    if (parsed.llmProvider === 'opencode' && parsed.llmModel && SLOW_OPENCODE_MODELS.has(parsed.llmModel)) {
+      merged.llmModel = DEFAULT_SETTINGS.llmModel;
+    }
+    if (parsed.llmProvider === 'opencode' && parsed.llmModel && PRE_HERMES_DEFAULT_MODELS.has(parsed.llmModel)) {
+      merged.llmProvider = DEFAULT_SETTINGS.llmProvider;
+      merged.llmModel = DEFAULT_SETTINGS.llmModel;
+      merged.systemPrompt = DEFAULT_SETTINGS.systemPrompt;
+    }
+    if (
+      parsed.llmProvider === 'hermes' &&
+      parsed.llmModel &&
+      (PRE_OPENCODE_GO_HERMES_MODELS.has(parsed.llmModel) || PRE_DEEPSEEK_FLASH_DEFAULT_MODELS.has(parsed.llmModel))
+    ) {
+      merged.llmModel = DEFAULT_SETTINGS.llmModel;
+    }
+    if (typeof parsed.llmRequestTimeoutMs !== 'number' || parsed.llmRequestTimeoutMs < DEFAULT_SETTINGS.llmRequestTimeoutMs) {
+      merged.llmRequestTimeoutMs = DEFAULT_SETTINGS.llmRequestTimeoutMs;
+    }
+    merged.settingsVersion = SETTINGS_SCHEMA_VERSION;
+    changed = true;
+  }
+
+  // Shape repairs: cheap, idempotent, and only touch invalid values.
+  if (typeof merged.streamingEnabled !== 'boolean') {
+    merged.streamingEnabled = DEFAULT_SETTINGS.streamingEnabled;
+    changed = true;
+  }
+  if (typeof merged.ttsChunkedPlaybackEnabled !== 'boolean') {
+    merged.ttsChunkedPlaybackEnabled = DEFAULT_SETTINGS.ttsChunkedPlaybackEnabled;
+    changed = true;
+  }
+  if (merged.voiceMode !== 'pipeline' && merged.voiceMode !== 'grok') {
+    merged.voiceMode = DEFAULT_SETTINGS.voiceMode;
+    merged.grokVoiceId = DEFAULT_SETTINGS.grokVoiceId;
+    changed = true;
+  }
+  if (!merged.wakeWord || !merged.wakeWord.trim()) {
+    merged.wakeWord = DEFAULT_SETTINGS.wakeWord;
+    changed = true;
+  }
+
+  return { settings: merged, changed };
+}
+
+function persistSettings(settings: AppSettings): void {
+  AsyncStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings)).catch(
+    (err) => console.warn('[Store] Failed to save settings:', err),
+  );
+}
+
 export const useAppStore = create<StoreState>((set, get) => ({
   // Pipeline state
   pipelineState: 'idle',
@@ -66,12 +156,12 @@ export const useAppStore = create<StoreState>((set, get) => ({
   error: null,
 
   // Conversation history
-  conversationHistory: [],
   chatSessions: [],
   activeSessionId: null,
 
   // Settings
   settings: { ...DEFAULT_SETTINGS },
+  settingsLoaded: false,
 
   // Bluetooth
   isBluetoothConnected: false,
@@ -96,15 +186,14 @@ export const useAppStore = create<StoreState>((set, get) => ({
 
   addConversationEntry: (entry: ConversationEntry) => {
     const { activeSessionId, chatSessions, createSession } = get();
-    // Auto-create a session if none is active
+    // Auto-create a session if none is active (or the active one was deleted)
     let sessionId = activeSessionId;
-    if (!sessionId) {
+    if (!sessionId || !chatSessions.some((s) => s.id === sessionId)) {
       sessionId = createSession();
     }
     const taggedEntry = { ...entry, sessionId };
 
     set((state) => ({
-      conversationHistory: [taggedEntry, ...state.conversationHistory],
       chatSessions: state.chatSessions.map((s) =>
         s.id === sessionId
           ? { ...s, entries: [taggedEntry, ...s.entries], updatedAt: Date.now() }
@@ -118,17 +207,28 @@ export const useAppStore = create<StoreState>((set, get) => ({
     get().persistSessions();
   },
 
-  clearHistory: () => set({ conversationHistory: [] }),
+  clearHistory: () => {
+    set({
+      chatSessions: [],
+      activeSessionId: null,
+      currentTranscription: '',
+      currentResponse: '',
+      interimTranscription: '',
+    });
+    get().persistSessions();
+  },
 
   updateSettings: (partial: Partial<AppSettings>) => {
     set((state) => ({
       settings: { ...state.settings, ...partial },
     }));
-    // Persist settings to AsyncStorage
-    const updated = get().settings;
-    AsyncStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(updated)).catch(
-      (err) => console.warn('[Store] Failed to save settings:', err),
-    );
+    persistSettings(get().settings);
+  },
+
+  resetSettings: () => {
+    const settings = { ...DEFAULT_SETTINGS };
+    set({ settings });
+    persistSettings(settings);
   },
 
   loadSettings: async () => {
@@ -136,82 +236,14 @@ export const useAppStore = create<StoreState>((set, get) => ({
       const raw = await AsyncStorage.getItem(SETTINGS_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw) as Partial<AppSettings>;
-        const merged = { ...DEFAULT_SETTINGS, ...parsed };
-        const needsWakeWordMigration = !!parsed.wakeWord && LEGACY_WAKE_WORDS.has(parsed.wakeWord.toLowerCase());
-        const needsPersonalityMigration = !!parsed.personalityId && LEGACY_PERSONALITY_IDS.has(parsed.personalityId.toLowerCase());
-        const needsModelMigration = parsed.llmProvider === 'opencode' && !!parsed.llmModel && SLOW_OPENCODE_MODELS.has(parsed.llmModel);
-        const needsHermesMigration =
-          parsed.llmProvider === 'opencode' &&
-          !!parsed.llmModel &&
-          PRE_HERMES_DEFAULT_MODELS.has(parsed.llmModel);
-        const needsOpenCodeGoHermesMigration =
-          parsed.llmProvider === 'hermes' &&
-          !!parsed.llmModel &&
-          PRE_OPENCODE_GO_HERMES_MODELS.has(parsed.llmModel);
-        const needsDeepSeekFlashDefaultMigration =
-          parsed.llmProvider === 'hermes' &&
-          !!parsed.llmModel &&
-          PRE_DEEPSEEK_FLASH_DEFAULT_MODELS.has(parsed.llmModel);
-        const needsTimeoutMigration =
-          typeof parsed.llmRequestTimeoutMs !== 'number' ||
-          parsed.llmRequestTimeoutMs < DEFAULT_SETTINGS.llmRequestTimeoutMs;
-        const needsStreamingMigration =
-          typeof parsed.streamingEnabled !== 'boolean' ||
-          typeof parsed.ttsChunkedPlaybackEnabled !== 'boolean';
-        const needsVoiceModeMigration =
-          parsed.voiceMode !== 'pipeline' && parsed.voiceMode !== 'grok';
-        if (needsWakeWordMigration) {
-          merged.wakeWord = DEFAULT_SETTINGS.wakeWord;
-          merged.wakeWordLang = DEFAULT_SETTINGS.wakeWordLang;
-        }
-        if (needsPersonalityMigration) {
-          merged.personalityId = DEFAULT_SETTINGS.personalityId;
-          merged.systemPrompt = DEFAULT_SETTINGS.systemPrompt;
-        }
-        if (needsModelMigration) {
-          merged.llmModel = DEFAULT_SETTINGS.llmModel;
-        }
-        if (needsHermesMigration) {
-          merged.llmProvider = DEFAULT_SETTINGS.llmProvider;
-          merged.llmModel = DEFAULT_SETTINGS.llmModel;
-          merged.systemPrompt = DEFAULT_SETTINGS.systemPrompt;
-        }
-        if (needsOpenCodeGoHermesMigration) {
-          merged.llmModel = DEFAULT_SETTINGS.llmModel;
-        }
-        if (needsDeepSeekFlashDefaultMigration) {
-          merged.llmModel = DEFAULT_SETTINGS.llmModel;
-        }
-        if (needsTimeoutMigration) {
-          merged.llmRequestTimeoutMs = DEFAULT_SETTINGS.llmRequestTimeoutMs;
-        }
-        if (needsStreamingMigration) {
-          merged.streamingEnabled = DEFAULT_SETTINGS.streamingEnabled;
-          merged.ttsChunkedPlaybackEnabled = DEFAULT_SETTINGS.ttsChunkedPlaybackEnabled;
-        }
-        if (needsVoiceModeMigration) {
-          merged.voiceMode = DEFAULT_SETTINGS.voiceMode;
-          merged.grokVoiceId = DEFAULT_SETTINGS.grokVoiceId;
-        }
-        if (
-          needsWakeWordMigration ||
-          needsPersonalityMigration ||
-          needsModelMigration ||
-          needsHermesMigration ||
-          needsOpenCodeGoHermesMigration ||
-          needsDeepSeekFlashDefaultMigration ||
-          needsTimeoutMigration ||
-          needsStreamingMigration ||
-          needsVoiceModeMigration
-        ) {
-          AsyncStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(merged)).catch(
-            (err) => console.warn('[Store] Failed to migrate settings:', err),
-          );
-        }
-        set({ settings: merged });
+        const { settings, changed } = migrateSettings(parsed);
+        if (changed) persistSettings(settings);
+        set({ settings });
       }
     } catch (err) {
       console.warn('[Store] Failed to load settings:', err);
+    } finally {
+      set({ settingsLoaded: true });
     }
   },
 
@@ -244,10 +276,10 @@ export const useAppStore = create<StoreState>((set, get) => ({
   // ── Session management ──────────────────────────────────────
 
   createSession: (name?: string) => {
-    const id = `session_${Date.now()}`;
+    const id = uniqueId('session');
     const session: ChatSession = {
       id,
-      name: name || `Chat ${new Date().toLocaleDateString('es-ES')}`,
+      name: name || defaultSessionName(),
       entries: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -260,6 +292,16 @@ export const useAppStore = create<StoreState>((set, get) => ({
     return id;
   },
 
+  setActiveSession: (sessionId: string | null) => {
+    set({
+      activeSessionId: sessionId,
+      currentTranscription: '',
+      currentResponse: '',
+      interimTranscription: '',
+      error: null,
+    });
+  },
+
   renameSession: (sessionId: string, name: string) => {
     set((state) => ({
       chatSessions: state.chatSessions.map((s) =>
@@ -270,26 +312,20 @@ export const useAppStore = create<StoreState>((set, get) => ({
   },
 
   deleteSession: (sessionId: string) => {
-    set((state) => {
-      const session = state.chatSessions.find((s) => s.id === sessionId);
-      const entryIds = new Set(session?.entries.map((e) => e.id) || []);
-      return {
-        chatSessions: state.chatSessions.filter((s) => s.id !== sessionId),
-        conversationHistory: state.conversationHistory.filter((e) => !entryIds.has(e.id)),
-        activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
-      };
-    });
+    set((state) => ({
+      chatSessions: state.chatSessions.filter((s) => s.id !== sessionId),
+      activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
+    }));
     get().persistSessions();
   },
 
   deleteEntry: (entryId: string) => {
     set((state) => ({
-      conversationHistory: state.conversationHistory.filter((e) => e.id !== entryId),
-      chatSessions: state.chatSessions.map((s) => ({
-        ...s,
-        entries: s.entries.filter((e) => e.id !== entryId),
-        updatedAt: Date.now(),
-      })),
+      chatSessions: state.chatSessions.map((s) =>
+        s.entries.some((e) => e.id === entryId)
+          ? { ...s, entries: s.entries.filter((e) => e.id !== entryId), updatedAt: Date.now() }
+          : s,
+      ),
     }));
     get().persistSessions();
   },
@@ -298,8 +334,13 @@ export const useAppStore = create<StoreState>((set, get) => ({
     try {
       const raw = await AsyncStorage.getItem(SESSIONS_STORAGE_KEY);
       if (raw) {
-        const sessions: ChatSession[] = JSON.parse(raw);
-        set({ chatSessions: sessions });
+        const stored: ChatSession[] = JSON.parse(raw);
+        if (!Array.isArray(stored)) return;
+        // Merge with anything created before the async load finished.
+        set((state) => {
+          const knownIds = new Set(state.chatSessions.map((s) => s.id));
+          return { chatSessions: [...state.chatSessions, ...stored.filter((s) => s?.id && !knownIds.has(s.id))] };
+        });
       }
     } catch (err) {
       console.warn('[Store] Failed to load sessions:', err);

@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
+import { NavigationContainer, DarkTheme as NavigationDarkTheme } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AppNavigator } from './src/navigation';
 import { COLORS } from './src/constants';
@@ -8,13 +8,12 @@ import { useAppStore } from './src/stores';
 import { LogService } from './src/services/LogService';
 
 const DarkTheme = {
-  ...DefaultTheme,
-  dark: true,
+  ...NavigationDarkTheme,
   colors: {
-    ...DefaultTheme.colors,
+    ...NavigationDarkTheme.colors,
     primary: COLORS.primary,
     background: COLORS.background,
-    card: COLORS.surface,
+    card: COLORS.card,
     text: COLORS.text,
     border: COLORS.border,
     notification: COLORS.error,

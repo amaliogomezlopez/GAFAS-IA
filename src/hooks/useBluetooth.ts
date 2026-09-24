@@ -83,7 +83,8 @@ export function useBluetooth() {
       clearInterval(interval);
       appStateSub.remove();
       unsubStatus();
-      BluetoothService.cleanup();
+      // Don't destroy the shared BLE manager here: other screens and the
+      // pipeline's button subscription keep using the same singleton.
     };
   }, [setBluetoothStatus]);
 
